@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Interactive project planning dashboard with Gantt chart, predecessor scheduling, cost control, S-curve and Kanban board." />
+  <title>GO Project Planner</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" role="img"><path d="M6 7h20v5H11v8h10v-3h-5v-4h10v12H6z"/></svg>
+        </div>
+        <div>
+          <strong>GO Planner</strong>
+          <span>Project control</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="dashboard" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-view="schedule" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h2v2h6V2h2v2h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h3V2Zm13 8H4v10h16V10ZM6 12h4v3H6v-3Z"/></svg>
+          <span>Gantt & tasks</span>
+        </button>
+        <button class="nav-item" data-view="critical" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm14 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM8 6h5v2H8V6Zm6 1 4 4-1.4 1.4-4-4L14 7Zm-8 4h2v4h7v2H6v-6Z"/></svg>
+          <span>Critical Path</span>
+        </button>
+        <button class="nav-item" data-view="kanban" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h5v16H3V4Zm7 0h5v10h-5V4Zm7 0h4v13h-4V4Z"/></svg>
+          <span>Kanban</span>
+        </button>
+        <button class="nav-item" data-view="costs" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16v2H2V3h2v16Zm2-2V9h3v8H6Zm5 0V5h3v12h-3Zm5 0v-6h3v6h-3Z"/></svg>
+          <span>Cost & S-curve</span>
+        </button>
+        <button class="nav-item" data-view="resources" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18v2H3v-2Zm1-2V9h3v9H4Zm5 0V4h3v14H9Zm5 0v-7h3v7h-3Zm5 0V6h3v12h-3Z"/></svg>
+          <span>Resource histogram</span>
+        </button>
+        <button class="nav-item" data-view="lookahead" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14a2 2 0 0 1 2 2v16H3V5a2 2 0 0 1 2-2Zm0 6v10h4V9H5Zm6 0v10h4V9h-4Zm6 0v10h2V9h-2ZM7 5v2h10V5H7Z"/></svg>
+          <span>3-week look ahead</span>
+        </button>
+        <button class="nav-item" data-view="settings" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.1 13 .1-1-.1-1 2.1-1.6-2-3.4-2.5 1a8.5 8.5 0 0 0-1.7-1L14.7 3h-4L10.3 6a8.5 8.5 0 0 0-1.7 1L6.1 6 4.1 9.4 6.2 11l-.1 1 .1 1-2.1 1.6 2 3.4 2.5-1a8.5 8.5 0 0 0 1.7 1l.4 3h4l.4-3a8.5 8.5 0 0 0 1.7-1l2.5 1 2-3.4L19.1 13ZM12.7 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8Z"/></svg>
+          <span>Project settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="project-health">
+          <div class="health-row"><span>Project health</span><strong id="sidebar-health-label">On track</strong></div>
+          <div class="health-track"><div id="sidebar-health-bar" class="health-bar"></div></div>
+          <small id="sidebar-health-copy">Schedule and cost are within plan.</small>
+        </div>
+        <button id="sidebar-add-task" class="primary-btn full-width" type="button">
+          <span aria-hidden="true">＋</span> Add task
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Active project</div>
+          <div class="project-title-row">
+            <h1 id="top-project-name">Factory Expansion — Phase 1</h1>
+            <span id="save-status" class="save-status"><span class="save-dot"></span> Saved locally</span>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button id="today-button" class="ghost-btn" type="button" title="Jump to the current date">Today</button>
+          <button id="export-json-button" class="ghost-btn" type="button" title="Download a project backup">Export</button>
+          <label class="print-size-control" title="Print paper size"><span>Paper</span><select id="print-paper-size"><option value="A4">A4</option><option value="A3">A3</option></select></label>
+          <button id="print-current-view" class="ghost-btn" type="button">Print</button>
+          <button id="top-add-task" class="primary-btn" type="button"><span aria-hidden="true">＋</span> Add task</button>
+        </div>
+      </header>
+
+      <section id="view-dashboard" class="view active" aria-labelledby="dashboard-heading">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Portfolio overview</p>
+            <h2 id="dashboard-heading">Project command center</h2>
+            <p id="dashboard-subtitle" class="page-subtitle">Live view of schedule, progress and cost performance.</p>
+          </div>
+          <div class="date-chip" id="dashboard-date-chip"></div>
+        </div>
+
+        <div id="dashboard-kpis" class="kpi-grid"></div>
+
+        <div class="dashboard-grid">
+          <article class="panel panel-wide">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Schedule</p>
+                <h3>Milestone outlook</h3>
+              </div>
+              <button class="text-btn" type="button" data-view-target="schedule">Open full Gantt →</button>
+            </div>
+            <div id="dashboard-gantt" class="mini-gantt"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Attention</p>
+                <h3>Priority queue</h3>
+              </div>
+              <span id="priority-count" class="count-badge">0</span>
+            </div>
+            <div id="priority-list" class="priority-list"></div>
+          </article>
+
+          <article class="panel panel-wide">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Cost performance</p>
+                <h3>S-curve snapshot</h3>
+              </div>
+              <button class="text-btn" type="button" data-view-target="costs">Inspect costs →</button>
+            </div>
+            <div id="dashboard-scurve" class="chart-host compact-chart"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Workflow</p>
+                <h3>Task distribution</h3>
+              </div>
+              <button class="text-btn" type="button" data-view-target="kanban">Open board →</button>
+            </div>
+            <div id="status-breakdown" class="status-breakdown"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-schedule" class="view" aria-labelledby="schedule-heading">
+        <div class="page-heading schedule-heading-row">
+          <div>
+            <p class="eyebrow">Integrated schedule</p>
+            <h2 id="schedule-heading">Gantt chart & task register</h2>
+            <p class="page-subtitle">Plan, update and review FS / FF / SS / SF relationships, baseline and critical path in one workspace.</p>
+          </div>
+          <div class="toolbar-group schedule-commandbar">
+            <label class="search-box" aria-label="Search tasks">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.7 19.3-4.2-4.2A7.5 7.5 0 1 0 15 16.5l4.3 4.2 1.4-1.4ZM5 10.5a5.5 5.5 0 1 1 11 0 5.5 5.5 0 0 1-11 0Z"/></svg>
+              <input id="task-search" type="search" placeholder="Search tasks, owner or ID" />
+            </label>
+            <div class="segmented" aria-label="Gantt zoom">
+              <button type="button" data-zoom="month">Month</button>
+              <button type="button" data-zoom="week" class="active">Week</button>
+              <button type="button" data-zoom="day">Day</button>
+            </div>
+            <button id="gantt-table-toggle" class="ghost-btn" type="button">Hide table</button>
+            <label class="gantt-width-control">Width <input id="gantt-table-width" type="range" min="320" max="920" step="20" /></label>
+            <details class="column-picker"><summary>Columns</summary><div>
+              <label><input type="checkbox" data-gantt-column="id"> ID</label><label><input type="checkbox" data-gantt-column="wbs"> WBS</label><label><input type="checkbox" data-gantt-column="name"> Task</label><label><input type="checkbox" data-gantt-column="start"> Start</label><label><input type="checkbox" data-gantt-column="finish"> Finish</label><label><input type="checkbox" data-gantt-column="days"> Days</label><label><input type="checkbox" data-gantt-column="tf"> TF</label><label><input type="checkbox" data-gantt-column="plan"> % Plan</label><label><input type="checkbox" data-gantt-column="actual"> % Actual</label><label><input type="checkbox" data-gantt-column="status"> Status</label>
+            </div></details>
+            <div class="segmented" aria-label="Critical path"><button type="button" data-gantt-critical="all">All</button><button type="button" data-gantt-critical="highlight">Critical</button><button type="button" data-gantt-critical="only">Critical only</button></div>
+            <button id="schedule-export-csv" class="ghost-btn" type="button">CSV</button>
+            <button id="set-baseline-button" class="ghost-btn" type="button">Set baseline</button>
+            <button id="schedule-add-task" class="primary-btn" type="button">＋ Add task</button>
+          </div>
+        </div>
+
+        <div id="schedule-alerts" class="alert-stack"></div>
+
+        <article class="panel schedule-panel">
+          <div class="panel-header schedule-panel-header">
+            <div>
+              <p class="panel-kicker">Timeline</p>
+              <h3 id="schedule-range-label">Project timeline</h3>
+            </div>
+            <div class="legend-row">
+              <span><i class="legend-swatch baseline"></i> Baseline</span>
+              <span><i class="legend-swatch planned"></i> Planned</span>
+              <span><i class="legend-swatch progress"></i> Progress</span>
+              <span><i class="legend-swatch critical"></i> Critical</span>
+              <span><i class="today-marker"></i> Today</span>
+            </div>
+          </div>
+          <div id="gantt-chart" class="gantt-shell" tabindex="0" aria-label="Interactive Gantt chart"></div>
+        </article>
+
+        <article class="panel gantt-scurve-panel">
+          <div class="panel-header">
+            <div><p class="panel-kicker">Construction progress plan</p><h3>Weekly progress & monthly accumulation</h3><p class="panel-supporting">Monthly totals are calculated from the weekly plan and actual values.</p></div>
+            <div class="toolbar-group">
+              <label class="toggle-control"><input id="gantt-scurve-toggle" type="checkbox" /> <span>Overlay S-curve on Gantt</span></label>
+              <label class="select-control">Summary<select id="gantt-scurve-period"><option value="week">Weekly detail</option><option value="month">Monthly from weeks</option></select></label>
+            </div>
+          </div>
+          <div id="gantt-scurve-overlay" class="gantt-scurve-host"></div>
+          <div class="table-scroll progress-matrix-scroll">
+            <table id="gantt-scurve-table" class="progress-matrix" aria-label="Weekly and monthly cumulative progress summary"></table>
+          </div>
+        </article>
+
+        <article class="panel table-panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">Task register</p>
+              <h3>Dependencies, dates and cost</h3>
+            </div>
+            <div id="task-table-summary" class="table-summary"></div>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Task</th>
+                  <th>Owner</th>
+                  <th class="numeric">Duration</th>
+                  <th class="numeric">TF</th>
+                  <th>Predecessor</th>
+                  <th>Start</th>
+                  <th>Finish</th>
+                  <th>Baseline start</th>
+                  <th>Baseline finish</th>
+                  <th class="numeric">Cost</th>
+                  <th>Resource</th>
+                  <th class="numeric">People/day</th>
+                  <th>Progress</th>
+                  <th>Status</th>
+                  <th aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody id="task-table-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-resources" class="view" aria-labelledby="resources-heading">
+        <div class="page-heading schedule-heading-row"><div><p class="eyebrow">Resource loading</p><h2 id="resources-heading">Resource Histogram</h2><p class="page-subtitle">Daily manpower demand stacked by team, with capacity and overload visibility.</p></div><div class="toolbar-group"><button class="ghost-btn" type="button" data-print-view="resources">Print A4/A3</button></div></div>
+        <div id="resource-kpis" class="kpi-grid"></div>
+        <article class="panel resource-chart-panel"><div class="panel-header"><div><p class="panel-kicker">Manpower loading</p><h3>People per day</h3></div><div id="resource-legend" class="network-legend"></div></div><div id="resource-histogram" class="resource-chart-host"></div></article>
+        <article class="panel table-panel"><div class="panel-header"><div><p class="panel-kicker">Resource register</p><h3>Task demand and person-days</h3></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>ID</th><th>Task</th><th>Team</th><th class="numeric">People/day</th><th class="numeric">Duration</th><th class="numeric">Person-days</th><th>Start</th><th>Finish</th><th>Load status</th></tr></thead><tbody id="resource-table-body"></tbody></table></div></article>
+      </section>
+
+      <section id="view-lookahead" class="view" aria-labelledby="lookahead-heading">
+        <div class="page-heading schedule-heading-row"><div><p class="eyebrow">Site coordination</p><h2 id="lookahead-heading">3-Week Look Ahead</h2><p id="lookahead-subtitle" class="page-subtitle"></p></div><div class="toolbar-group"><button class="ghost-btn" type="button" data-print-view="lookahead">Print A4/A3</button></div></div>
+        <div id="lookahead-summary" class="kpi-grid lookahead-kpis"></div>
+        <div id="lookahead-board" class="lookahead-board"></div>
+      </section>
+
+      <section id="view-critical" class="view" aria-labelledby="critical-heading">
+        <div class="page-heading schedule-heading-row">
+          <div>
+            <p class="eyebrow">CPM network</p>
+            <h2 id="critical-heading">Critical Path</h2>
+            <p class="page-subtitle">Dependency network with relationship types, early/late dates and total float.</p>
+          </div>
+          <div class="toolbar-group">
+            <div class="segmented" aria-label="Critical path filter">
+              <button id="critical-only-button" type="button">Critical only</button>
+              <button id="critical-all-button" type="button" class="active">Show all</button>
+            </div>
+            <button id="critical-zoom-out" class="ghost-btn" type="button" aria-label="Zoom out">−</button>
+            <button id="critical-zoom-in" class="ghost-btn" type="button" aria-label="Zoom in">＋</button>
+            <button id="critical-fit" class="ghost-btn" type="button">Fit diagram</button>
+          </div>
+        </div>
+        <div id="critical-alerts" class="alert-stack"></div>
+        <article class="panel network-panel">
+          <div class="panel-header">
+            <div><p class="panel-kicker">Node-and-arrow</p><h3 id="critical-network-summary">Schedule network</h3></div>
+            <div class="network-legend"><span><i class="network-dot critical"></i> Critical</span><span><i class="network-dot normal"></i> Non-critical</span></div>
+          </div>
+          <div id="critical-network" class="network-shell" tabindex="0" aria-label="Interactive critical path network diagram"></div>
+        </article>
+      </section>
+
+      <section id="view-kanban" class="view" aria-labelledby="kanban-heading">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Workflow management</p>
+            <h2 id="kanban-heading">Kanban board</h2>
+            <p class="page-subtitle">Drag cards between columns. Moving a card to Done automatically sets progress to 100%.</p>
+          </div>
+          <div class="toolbar-group">
+            <label class="select-control">Owner
+              <select id="kanban-owner-filter"><option value="all">All owners</option></select>
+            </label>
+            <button id="kanban-add-task" class="primary-btn" type="button">＋ Add task</button>
+          </div>
+        </div>
+        <div id="kanban-board" class="kanban-board"></div>
+      </section>
+
+      <section id="view-costs" class="view" aria-labelledby="costs-heading">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Financial control</p>
+            <h2 id="costs-heading">Cost plan & S-curve</h2>
+            <p class="page-subtitle">Planned value, earned value and actual cost calculated from the active task schedule.</p>
+          </div>
+          <button id="print-cost-view" class="ghost-btn" type="button">Print report</button>
+        </div>
+        <div id="cost-kpis" class="kpi-grid cost-kpis"></div>
+        <article class="panel cost-chart-panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">Cumulative performance</p>
+              <h3>Project S-curve</h3>
+            </div>
+            <div class="legend-row">
+              <span><i class="legend-line planned-line"></i> Planned value</span>
+              <span><i class="legend-line earned-line"></i> Earned value</span>
+              <span><i class="legend-line actual-line"></i> Actual cost</span>
+            </div>
+          </div>
+          <div id="cost-scurve" class="chart-host large-chart"></div>
+        </article>
+
+        <div class="cost-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div><p class="panel-kicker">Forecast</p><h3>Cost by workflow stage</h3></div>
+            </div>
+            <div id="cost-by-status" class="cost-bars"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-header">
+              <div><p class="panel-kicker">Control metrics</p><h3>Earned value indicators</h3></div>
+            </div>
+            <div id="evm-explainer" class="metric-list"></div>
+          </article>
+        </div>
+
+        <article class="panel table-panel">
+          <div class="panel-header">
+            <div><p class="panel-kicker">Cost register</p><h3>Task-level budget and actuals</h3></div>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>ID</th><th>Task</th><th class="numeric">Budget</th><th class="numeric">Actual cost</th><th class="numeric">Variance</th><th>Progress</th><th>Cost status</th></tr></thead>
+              <tbody id="cost-table-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-settings" class="view" aria-labelledby="settings-heading">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Configuration</p>
+            <h2 id="settings-heading">Project settings & data</h2>
+            <p class="page-subtitle">Change project assumptions, create backups or restore the demonstration dataset.</p>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <article class="panel settings-panel">
+            <div class="panel-header"><div><p class="panel-kicker">Project</p><h3>General information</h3></div></div>
+            <form id="project-settings-form" class="form-grid">
+              <label class="field span-2"><span>Project name</span><input id="settings-project-name" type="text" required /></label>
+              <label class="field"><span>Project start</span><input id="settings-project-start" type="date" required /></label>
+              <label class="field"><span>Currency</span><select id="settings-currency"><option value="THB">THB — Thai baht</option><option value="USD">USD — US dollar</option><option value="EUR">EUR — Euro</option><option value="GBP">GBP — Pound sterling</option><option value="SGD">SGD — Singapore dollar</option></select></label>
+              <label class="field"><span>Approved budget</span><input id="settings-budget" type="number" min="0" step="1000" required /></label>
+              <label class="field"><span>Data date</span><input id="settings-data-date" type="date" required /></label>
+              <label class="field"><span>Manpower capacity (people/day)</span><input id="settings-resource-capacity" type="number" min="1" step="1" required /></label>
+              <label class="field"><span>Calendar</span><select id="settings-calendar"><option value="calendar">Calendar days</option></select></label>
+              <label class="field span-2"><span>Project note</span><textarea id="settings-note" rows="4" placeholder="Scope, reporting assumptions or key constraints"></textarea></label>
+              <div class="form-actions span-2"><button class="primary-btn" type="submit">Save project settings</button></div>
+            </form>
+          </article>
+
+          <article class="panel settings-panel">
+            <div class="panel-header"><div><p class="panel-kicker">Data management</p><h3>Backup & restore</h3></div></div>
+            <div class="settings-actions">
+              <button id="settings-export-json" class="action-card" type="button">
+                <span class="action-icon">⇩</span><span><strong>Export project backup</strong><small>Download all project, task and status data as JSON.</small></span>
+              </button>
+              <button id="settings-import-json" class="action-card" type="button">
+                <span class="action-icon">⇧</span><span><strong>Import project backup</strong><small>Restore a previously exported GO Planner file.</small></span>
+              </button>
+              <button id="settings-import-msp-xml" class="action-card" type="button">
+                <span class="action-icon">MSP</span><span><strong>Import Microsoft Project XML</strong><small>Import tasks, WBS, dates, dependencies, progress, baseline, costs and resource assignments.</small></span>
+              </button>
+              <button id="settings-export-csv" class="action-card" type="button">
+                <span class="action-icon">▦</span><span><strong>Export task register</strong><small>Download the current schedule and cost fields as CSV.</small></span>
+              </button>
+              <button id="settings-reset-demo" class="action-card danger-card" type="button">
+                <span class="action-icon">↺</span><span><strong>Reset demonstration data</strong><small>Replace local edits with the original example project.</small></span>
+              </button>
+            </div>
+          </article>
+
+          <article class="panel settings-panel span-2">
+            <div class="panel-header"><div><p class="panel-kicker">Scheduling rules</p><h3>How predecessor logic works</h3></div></div>
+            <div class="rule-grid">
+              <div class="rule-item"><strong>Relationship types</strong><p>Use <code>FS</code>, <code>FF</code>, <code>SS</code> or <code>SF</code>. A bare ID remains Finish-to-Start.</p></div>
+              <div class="rule-item"><strong>Multiple predecessors</strong><p>Separate conditions with commas, for example <code>T100FS+2,T110SS,T120FF-1</code>.</p></div>
+              <div class="rule-item"><strong>Lag & lead</strong><p>Use positive lag or negative lead, for example <code>T130SF+3</code> or <code>T120FF-1</code>.</p></div>
+              <div class="rule-item"><strong>Critical path</strong><p>Tasks with zero total float are highlighted in the Gantt chart and task register.</p></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+      <div class="modal-header">
+        <div><p class="panel-kicker">Task editor</p><h2 id="task-modal-title">Add task</h2></div>
+        <button id="close-task-modal" class="icon-btn" type="button" aria-label="Close task editor">×</button>
+      </div>
+      <form id="task-form" class="task-form">
+        <input id="task-edit-original-id" type="hidden" />
+        <div class="form-grid">
+          <label class="field"><span>Task ID</span><input id="task-id" type="text" maxlength="12" required placeholder="T220" /></label>
+          <label class="field"><span>Status</span><select id="task-status"><option value="backlog">Backlog</option><option value="in-progress">In progress</option><option value="review">Review</option><option value="done">Done</option></select></label>
+          <label class="field span-2"><span>Task name</span><input id="task-name" type="text" required placeholder="Task description" /></label>
+          <label class="field"><span>Owner</span><input id="task-owner" type="text" placeholder="Team or person" /></label>
+          <label class="field"><span>WBS / Work package</span><input id="task-wbs" type="text" placeholder="WBS 1 · Structure" /></label>
+          <label class="field"><span>Resource team</span><input id="task-resource-team" type="text" placeholder="Civil crew" /></label>
+          <label class="field"><span>People per day</span><input id="task-manpower" type="number" min="0" max="9999" step="1" value="0" /></label>
+          <label class="field"><span>Duration (calendar days)</span><input id="task-duration" type="number" min="1" max="999" value="5" required /></label>
+          <label class="field"><span>Actual Start / เริ่มจริง</span><input id="task-actual-start" type="date" /></label>
+          <label class="field"><span>Actual Finish / จบจริง</span><input id="task-actual-finish" type="date" /></label>
+          <label class="field"><span>Planned start</span><input id="task-planned-start" type="date" /></label>
+          <label class="field"><span>Planned finish</span><input id="task-planned-finish" type="date" /></label>
+          <label class="field"><span>Predecessor</span><input id="task-predecessor" type="text" placeholder="T100FS+2,T110SS,T120FF-1" /></label>
+          <label class="field"><span>Progress (%)</span><input id="task-progress" type="number" min="0" max="100" step="1" value="0" required /></label>
+          <label class="field"><span>Budget cost</span><input id="task-cost" type="number" min="0" step="100" value="0" required /></label>
+          <label class="field"><span>Actual cost</span><input id="task-actual-cost" type="number" min="0" step="100" value="0" required /></label>
+          <label class="field span-2"><span>Notes</span><textarea id="task-notes" rows="3" placeholder="Deliverable, constraint or acceptance criteria"></textarea></label>
+        </div>
+        <div id="task-form-error" class="form-error" role="alert"></div>
+        <div class="modal-actions">
+          <button id="delete-task-button" class="danger-btn" type="button" hidden>Delete task</button>
+          <div class="modal-actions-right"><button id="cancel-task-button" class="ghost-btn" type="button">Cancel</button><button class="primary-btn" type="submit">Save task</button></div>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <input id="import-json-input" type="file" accept="application/json,.json" hidden />
+  <input id="import-msp-xml-input" type="file" accept="application/xml,text/xml,.xml" hidden />
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
