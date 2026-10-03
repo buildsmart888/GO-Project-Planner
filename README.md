@@ -1,6 +1,10 @@
 # GO Project Planner
 
 Browser-based construction project planning and control. Pilot release 0.7.
+<img width="1763" height="1495" alt="image" src="https://github.com/user-attachments/assets/05fd13be-aada-418e-8f48-c7837e58c452" />
+<img width="1763" height="3273" alt="image" src="https://github.com/user-attachments/assets/3ed6fe93-a823-4cfc-a728-fcc99c3c242d" />
+
+
 
 ## Run locally
 
