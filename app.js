@@ -22,9 +22,11 @@
   let networkView = { scale: 1, x: 20, y: 20 };
   let networkDrag = null;
   let historyPast = [], historyFuture = [], historySnapshot = null;
+  let pendingXmlImport = null;
 
   function init() {
     initPilot();
+    initControl09();
     wireEvents();
     renderAll();
     setView(state.ui.activeView || "dashboard", false);
@@ -386,6 +388,11 @@
         baselineCost: clampNumber(task.baselineCost, 0, Number.MAX_SAFE_INTEGER, 0),
         cost: clampNumber(task.cost, 0, Number.MAX_SAFE_INTEGER, 0),
         actualCost: clampNumber(task.actualCost, 0, Number.MAX_SAFE_INTEGER, 0),
+        actualHistory: normalizeActualHistory(task.actualHistory),
+        constraint: String(task.constraint || ""),
+        constraintOwner: String(task.constraintOwner || task.owner || ""),
+        constraintDue: isISODate(task.constraintDue) ? task.constraintDue : "",
+        ready: task.ready !== false,
         progress: clampNumber(task.progress, 0, 100, 0),
         status: STATUS_ORDER.includes(task.status) ? task.status : "backlog",
         notes: String(task.notes || "")
@@ -962,27 +969,31 @@
 
   function buildProgressSeries(schedule) {
     const baselineFinishIndex = Math.max(0, ...state.tasks.filter((task) => task.baselineFinish).map((task) => diffDays(schedule.projectStart, fromISO(task.baselineFinish))));
-    const totalDays = Math.max(1, schedule.projectFinishIndex + 1, baselineFinishIndex + 1);
+    const totalDays = Math.max(1, schedule.projectFinishIndex + 1, baselineFinishIndex + 1, schedule.todayIndex + 1);
     const hasBaseline = state.tasks.some((task) => task.baselineStart && task.baselineFinish);
-    const weightTotal = Math.max(1, state.tasks.reduce((sum, task) => sum + Number(hasBaseline ? task.baselineCost || task.cost || 0 : task.cost || 0), 0));
-    const plan = [], actual = [];
+    const monetaryWeights=state.tasks.some(task=>!task.summary&&Number(hasBaseline?task.baselineCost||task.cost||0:task.cost||0)>0);
+    const weightFor=task=>monetaryWeights?Number(hasBaseline?task.baselineCost||task.cost||0:task.cost||0):Number(task.milestone?0:task.duration||0);
+    const weightTotal = Math.max(1, state.tasks.filter(task=>!task.summary).reduce((sum, task) => sum + weightFor(task), 0));
+    const plan = [], actual = [], cash = [];
     for (let day = 0; day < totalDays; day++) {
-      let plannedValue = 0, actualValue = 0;
+      let plannedValue = 0, actualValue = 0, actualCost = 0;
       schedule.rows.forEach((row) => {
-        const weight = Number(hasBaseline ? row.task.baselineCost || row.task.cost || 0 : row.task.cost || 0);
+        if (row.task.summary) return;
+        const weight = weightFor(row.task);
         if (hasBaseline && row.task.baselineStart && row.task.baselineFinish) {
           const bs = diffDays(schedule.projectStart, fromISO(row.task.baselineStart));
           const bf = diffDays(schedule.projectStart, fromISO(row.task.baselineFinish));
           const fraction = day < bs ? 0 : day >= bf ? 1 : clampNumber(workdaysBetween(fromISO(row.task.baselineStart),addDays(schedule.projectStart,day))/Math.max(1,workdaysBetween(fromISO(row.task.baselineStart),fromISO(row.task.baselineFinish))), 0, 1, 0);
           plannedValue += weight * fraction;
         } else plannedValue += weight * plannedFraction(row, day);
-        const earned = weight * Number(row.task.progress || 0) / 100;
-        actualValue += earned * actualFraction(row, day, schedule.todayIndex);
+        actualValue += weight * actualAt(row.task, addDays(schedule.projectStart,day)).progress / 100;
+        actualCost += actualAt(row.task,addDays(schedule.projectStart,day)).cost;
       });
       plan.push(plannedValue / weightTotal * 100);
       actual.push(actualValue / weightTotal * 100);
+      cash.push(actualCost);
     }
-    return { plan, actual, weightTotal };
+    return { plan, actual, cash, weightTotal, monetaryWeights };
   }
 
   function buildGanttOverlaySvg(schedule, width, rowsHeight, headerHeight) {
@@ -998,21 +1009,7 @@
     const table = document.getElementById("gantt-scurve-table");
     const series = buildProgressSeries(schedule);
     const period = state.ui.curvePeriod === "month" ? "month" : "week";
-    const weekly = [];
-    for (let start = 0; start < series.plan.length; start += 7) {
-      const end = Math.min(series.plan.length - 1, start + 6);
-      const sumPlan = series.plan[end], sumActual = series.actual[end];
-      const priorPlan = weekly.length ? weekly[weekly.length - 1].sumPlan : 0;
-      const priorActual = weekly.length ? weekly[weekly.length - 1].sumActual : 0;
-      weekly.push({ start, end, sumPlan, sumActual, plan: sumPlan - priorPlan, actual: sumActual - priorActual, month: monthKey(addDays(schedule.projectStart, end)) });
-    }
-    const buckets = period === "week" ? weekly : [...weekly.reduce((groups, week) => {
-      if (!groups.has(week.month)) groups.set(week.month, { ...week, plan: 0, actual: 0 });
-      const month = groups.get(week.month);
-      month.end = week.end; month.sumPlan = week.sumPlan; month.sumActual = week.sumActual;
-      month.plan += week.plan; month.actual += week.actual;
-      return groups;
-    }, new Map()).values()];
+    const buckets = progressBuckets(schedule,series,period);
     const width = 1000, height = 270, left = 58, right = 22, top = 18, bottom = 34;
     const x = (index) => left + (buckets.length <= 1 ? 0 : index / (buckets.length - 1) * (width - left - right));
     const y = (value) => top + (100 - value) / 100 * (height - top - bottom);
@@ -1026,11 +1023,19 @@
       else monthGroups.push({ label, count: 1 });
     });
     const value = (number, currency = false) => currency ? formatCompactCurrency(number) : `${round1(number)}%`;
-    const row = (section, label, key, cumulative = false, currency = false) => `<tr class="${cumulative ? "cumulative" : ""}"><th class="matrix-section">${section}</th><th>${label}</th>${buckets.map((b) => `<td>${value(currency ? series.weightTotal * b[key] / 100 : b[key], currency)}</td>`).join("")}</tr>`;
-    table.innerHTML = `<thead><tr><th rowspan="2" class="matrix-corner">Type</th><th rowspan="2" class="matrix-metric">Progress control</th>${monthGroups.map((group) => `<th colspan="${group.count}" class="matrix-month">${escapeHtml(group.label)}</th>`).join("")}</tr><tr>${buckets.map((b, i) => `<th class="matrix-period">${period === "week" ? `W${i + 1}<small>${formatDate(addDays(schedule.projectStart, b.start))}–${formatDate(addDays(schedule.projectStart, b.end))}</small>` : formatMonthDay(addDays(schedule.projectStart, b.end))}</th>`).join("")}</tr></thead><tbody>
+    const row = (section, label, key, cumulative = false, currency = false) => `<tr class="${cumulative ? "cumulative" : ""}"><th class="matrix-section">${section}</th><th>${label}</th>${buckets.map((b) => `<td>${currency&&!series.monetaryWeights?"—":value(currency ? series.weightTotal * b[key] / 100 : b[key], currency)}</td>`).join("")}</tr>`;
+table.innerHTML = `<caption>Data Date ${escapeHtml(state.project.dataDate)} · Actual % ถ่วงน้ำหนัก \${series.monetaryWeights?'งบประมาณ':'ระยะเวลา (ไม่มีงบประมาณ)'} · มูลค่าผลงานไม่ใช่ค่าใช้จ่าย · ${state.tasks.filter(t=>!t.summary&&!t.actualHistory?.length).length} งานไม่มีประวัติ ใช้ snapshot ณ Data Date · เดือนจัดตามวันสิ้นงวดสัปดาห์</caption><thead><tr><th rowspan="2" class="matrix-corner">Type</th><th rowspan="2" class="matrix-metric">Progress control</th>${monthGroups.map((group) => `<th colspan="${group.count}" class="matrix-month">${escapeHtml(group.label)}</th>`).join("")}</tr><tr>${buckets.map((b, i) => `<th class="matrix-period">${period === "week" ? `W${i + 1}<small>${formatDate(addDays(schedule.projectStart, b.start))}–${formatDate(addDays(schedule.projectStart, b.end))}</small>` : formatMonthDay(addDays(schedule.projectStart, b.end))}</th>`).join("")}</tr></thead><tbody>
       ${row("PLAN", "Plan / period", "plan")}${row("", "Sum Plan", "sumPlan", true)}${row("", "Plan value / period", "plan", false, true)}${row("", "Sum Plan value", "sumPlan", true, true)}
       ${row("ACTUAL", "Actual / period", "actual")}${row("", "Sum Actual", "sumActual", true)}${row("", "Actual value / period", "actual", false, true)}${row("", "Sum Actual value", "sumActual", true, true)}
+      <tr><th>ค่าใช้จ่าย</th><th>รายงวด</th>${buckets.map(b=>`<td>${formatCompactCurrency(b.cash)}</td>`).join("")}</tr><tr class="cumulative"><th></th><th>ค่าใช้จ่ายสะสม</th>${buckets.map(b=>`<td>${formatCompactCurrency(b.sumCash)}</td>`).join("")}</tr>
     </tbody>`;
+  }
+
+  function progressBuckets(schedule,series,period) {
+    const weekly=[];
+    for(let start=0;start<series.plan.length;start+=7){const end=Math.min(series.plan.length-1,start+6),prior=weekly.at(-1);weekly.push({start,end,sumPlan:series.plan[end],sumActual:series.actual[end],sumCash:series.cash[end],plan:series.plan[end]-(prior?.sumPlan||0),actual:series.actual[end]-(prior?.sumActual||0),cash:series.cash[end]-(prior?.sumCash||0),month:monthKey(addDays(schedule.projectStart,end))});}
+    if(period==="week")return weekly;
+    return [...weekly.reduce((groups,w)=>{if(!groups.has(w.month))groups.set(w.month,{...w,plan:0,actual:0,cash:0});const m=groups.get(w.month);m.end=w.end;m.sumPlan=w.sumPlan;m.sumActual=w.sumActual;m.sumCash=w.sumCash;m.plan+=w.plan;m.actual+=w.actual;m.cash+=w.cash;return groups;},new Map()).values()];
   }
 
   function renderTaskTable(rows) {
@@ -1151,10 +1156,34 @@
     if (!style) { style = document.createElement("style"); style.id = "dynamic-print-page"; document.head.appendChild(style); }
     style.textContent = `@page { size: ${size} landscape; margin: 10mm; }`;
     document.body.dataset.printView = view;
+    document.getElementById("schedule-print-sheet")?.remove();
+    if(view==="schedule") {
+      const chart=document.querySelector("#gantt-chart .gantt-inner");
+      if(chart){
+        const sheet=document.createElement("section");sheet.id="schedule-print-sheet";
+        const clone=chart.cloneNode(true),matrix=document.querySelector(".gantt-scurve-panel")?.cloneNode(true);
+        const paperWidth=(size==="A3"?420:297)-20,paperHeight=(size==="A3"?297:210)-20;
+        const width=Math.max(chart.scrollWidth,chart.getBoundingClientRect().width);
+        sheet.style.width=`${width}px`;
+        sheet.innerHTML=`<header class="print-report-title"><h2>${escapeHtml(state.project.name)}</h2><p>Gantt & Progress · Data Date ${escapeHtml(state.project.dataDate)} · ${escapeHtml(state.project.calendar)} · ${state.ui.ganttCriticalMode} · ${size} Landscape</p></header>`;
+        const arrow=clone.querySelector("#ganttArrow");if(arrow){arrow.id="printGanttArrow";clone.querySelectorAll("[marker-end]").forEach(el=>el.setAttribute("marker-end","url(#printGanttArrow)"));}
+        clone.querySelectorAll("[id]").forEach(el=>{if(el.id!=="printGanttArrow")el.removeAttribute("id");});
+        matrix?.querySelectorAll("[id]").forEach(el=>el.removeAttribute("id"));
+        clone.style.width=`${width}px`;sheet.append(clone);
+        if(matrix&&!document.body.classList.contains("pilot-hide-summary")){matrix.querySelector(".gantt-scurve-host")?.remove();matrix.querySelector(".panel-header")?.remove();sheet.append(matrix);}
+        document.getElementById("view-schedule").prepend(sheet);
+        // Physical fit includes both timeline and period table, not the viewport width.
+        const fitWidth=paperWidth*96/25.4/width;
+        const height=Math.max(sheet.scrollHeight,chart.scrollHeight+(matrix?matrix.scrollHeight:0)+110);
+        const fitPage=paperHeight*96/25.4/Math.max(1,height);
+        const mode=document.body.dataset.printFit||"page";
+        sheet.style.setProperty("--report-print-scale",String(Math.min(1,fitWidth,mode==="page"?fitPage:1)));
+      }
+    }
     requestAnimationFrame(() => window.print());
   }
 
-  window.addEventListener("afterprint", () => { delete document.body.dataset.printView; });
+  window.addEventListener("afterprint", () => { delete document.body.dataset.printView;document.getElementById("schedule-print-sheet")?.remove(); });
 
   function truncate(value, max) {
     const text = String(value || "");
@@ -1211,17 +1240,18 @@
   }
 
   function calculatePerformance(schedule) {
-    const totalPlanned = state.tasks.reduce((sum, task) => sum + Number(task.cost || 0), 0);
-    const actualCost = state.tasks.reduce((sum, task) => sum + Number(task.actualCost || 0), 0);
-    const earnedValue = state.tasks.reduce((sum, task) => sum + Number(task.cost || 0) * Number(task.progress || 0) / 100, 0);
-    const weight = totalPlanned > 0 ? totalPlanned : state.tasks.reduce((sum, task) => sum + Number(task.duration || 0), 0);
-    const weighted = state.tasks.reduce((sum, task) => {
+    const activities=state.tasks.filter(t=>!t.summary);
+    const totalPlanned = activities.reduce((sum, task) => sum + Number(task.cost || 0), 0);
+    const actualCost = activities.reduce((sum, task) => sum + actualAt(task,fromISO(state.project.dataDate)).cost, 0);
+    const earnedValue = activities.reduce((sum, task) => sum + Number(task.cost || 0) * actualAt(task,fromISO(state.project.dataDate)).progress / 100, 0);
+    const weight = totalPlanned > 0 ? totalPlanned : activities.reduce((sum, task) => sum + Number(task.duration || 0), 0);
+    const weighted = activities.reduce((sum, task) => {
       const taskWeight = totalPlanned > 0 ? Number(task.cost || 0) : Number(task.duration || 0);
-      return sum + taskWeight * Number(task.progress || 0) / 100;
+      return sum + taskWeight * actualAt(task,fromISO(state.project.dataDate)).progress / 100;
     }, 0);
     const overallProgress = weight ? weighted / weight * 100 : 0;
     const todayIndex = schedule.todayIndex;
-    const plannedValue = schedule.rows.reduce((sum, row) => sum + Number(row.task.cost || 0) * plannedFraction(row, todayIndex), 0);
+    const plannedValue = schedule.rows.filter(r=>!r.task.summary).reduce((sum, row) => sum + Number(row.task.cost || 0) * plannedFraction(row, todayIndex), 0);
     const cpi = actualCost > 0 ? earnedValue / actualCost : null;
     const spi = plannedValue > 0 ? earnedValue / plannedValue : null;
     return {
@@ -1293,7 +1323,7 @@
   }
 
   function buildSCurve(schedule) {
-    const totalDays = Math.max(1, schedule.projectFinishIndex + 1);
+    const totalDays = Math.max(1, schedule.projectFinishIndex + 1, schedule.todayIndex + 1);
     const sampleStep = Math.max(1, Math.ceil(totalDays / 100));
     const sampleIndexes = [];
     for (let index = 0; index < totalDays; index += sampleStep) sampleIndexes.push(index);
@@ -1308,13 +1338,14 @@
       let e = 0;
       let a = 0;
       schedule.rows.forEach((row) => {
+        if (row.task.summary) return;
         const taskCost = Number(row.task.cost || 0);
         const progressValue = taskCost * Number(row.task.progress || 0) / 100;
         const actualValue = Number(row.task.actualCost || 0);
         p += taskCost * plannedFraction(row, dayIndex);
-        const curveFraction = actualFraction(row, dayIndex, schedule.todayIndex);
-        e += progressValue * curveFraction;
-        a += actualValue * curveFraction;
+        const recorded = actualAt(row.task, addDays(schedule.projectStart,dayIndex));
+        e += taskCost * recorded.progress / 100;
+        a += recorded.cost;
       });
       planned.push(p);
       earned.push(e);
@@ -1330,6 +1361,65 @@
     else earnedEnd = Math.min(row.ef, Math.max(row.es, todayIndex));
     if (dayIndex >= earnedEnd) return 1;
     return clampNumber((dayIndex - row.es + 1) / Math.max(1, earnedEnd - row.es + 1), 0, 1, 0);
+  }
+
+  function normalizeActualHistory(records) {
+    const dates = new Map();
+    (Array.isArray(records) ? records : []).forEach(record => {
+      if (isISODate(record.date)) dates.set(record.date, {date:record.date,progress:clampNumber(record.progress,0,100,0),cost:clampNumber(record.cost,0,Number.MAX_SAFE_INTEGER,0),note:String(record.note||"")});
+    });
+    return [...dates.values()].sort((a,b)=>a.date.localeCompare(b.date));
+  }
+
+  // Dated cumulative observations: hold the last known value; never fabricate earlier actuals.
+  function actualAt(task, date) {
+    const cutoff = toISO(date) < state.project.dataDate ? toISO(date) : state.project.dataDate;
+    const history = normalizeActualHistory(task.actualHistory);
+    if (history.length) {
+      const record = history.filter(r=>r.date<=cutoff).at(-1);
+      return record || {progress:0,cost:0};
+    }
+    return cutoff >= state.project.dataDate ? {progress:Number(task.progress||0),cost:Number(task.actualCost||0)} : {progress:0,cost:0};
+  }
+
+  function weeklyActualDialog(taskId) {
+    const tasks=state.tasks.filter(t=>!t.summary), task=tasks.find(t=>t.id===taskId)||tasks[0];
+    if(!task){showToast("เพิ่มกิจกรรมก่อนบันทึกผลงาน","error");return;}
+    const records=normalizeActualHistory(task.actualHistory);
+    pilotDialog("Actual รายสัปดาห์ / Progress log", `<p>กรอก <b>ผลงานสะสม (%) และค่าใช้จ่ายสะสม</b> ณ วันสิ้นงวด เลือกวันที่เดิมเพื่อแก้ย้อนหลัง เดือนรวมจากผลต่างรายสัปดาห์ตามเดือนของวันสิ้นงวด</p><label>กิจกรรม<select id="actual-log-task">${tasks.map(t=>`<option value="${escapeAttr(t.id)}" ${t.id===task.id?"selected":""}>${escapeHtml(t.id+" · "+t.name)}</option>`).join("")}</select></label><div class="actual-log-grid"><label>วันสิ้นงวด<input id="actual-log-date" type="date" value="${escapeAttr(state.project.dataDate)}" max="${escapeAttr(state.project.dataDate)}"></label><label>ผลงานสะสม %<input id="actual-log-progress" type="number" min="0" max="100" step="0.1" value="${task.progress}"></label><label>ค่าใช้จ่ายสะสม<input id="actual-log-cost" type="number" min="0" step="0.01" value="${task.actualCost}"></label></div><label>หมายเหตุ<input id="actual-log-note"></label><p id="actual-log-error" role="alert" class="bad"></p><button data-save-actual="${escapeAttr(task.id)}">บันทึกงวด</button><div class="table-scroll"><table class="data-table"><thead><tr><th>สิ้นงวด</th><th>สะสม %</th><th>ค่าใช้จ่ายสะสม</th><th>หมายเหตุ</th><th></th></tr></thead><tbody>${records.map(r=>`<tr><td>${escapeHtml(r.date)}</td><td>${r.progress}%</td><td>${formatCurrency(r.cost)}</td><td>${escapeHtml(r.note)}</td><td><button data-load-actual="${escapeAttr(r.date)}">แก้ไข</button><button data-delete-actual="${escapeAttr(r.date)}">ลบ</button></td></tr>`).join("")||'<tr><td colspan="5">ยังไม่มีประวัติ — ค่าเดิมจะแสดงเป็น snapshot ณ Data Date เท่านั้น ไม่กระจายย้อนหลัง</td></tr>'}</tbody></table></div><p class="pilot-note">เมื่อมีประวัติ กราฟใช้ค่าที่บันทึกตามวันที่ ไม่ใช้ % ปัจจุบันเพื่อแต่งประวัติย้อนหลัง เก็บอยู่ในเครื่องและรวมอยู่ใน Backup</p>`);
+    document.getElementById("actual-log-task").addEventListener("change",e=>weeklyActualDialog(e.target.value));
+    document.getElementById("actual-log-date").addEventListener("change",e=>{const previous=records.filter(r=>r.date<=e.target.value).at(-1);document.getElementById("actual-log-progress").value=previous?.progress||0;document.getElementById("actual-log-cost").value=previous?.cost||0;document.getElementById("actual-log-note").value=records.find(r=>r.date===e.target.value)?.note||"";});
+  }
+
+  function syncActualLog(task) {
+    const record=normalizeActualHistory(task.actualHistory).filter(r=>r.date<=state.project.dataDate).at(-1);
+    task.progress=record?.progress||0;task.actualCost=record?.cost||0;
+    task.status=task.progress>=100?"done":task.progress>0?"in-progress":"backlog";
+  }
+
+  function initControl09() {
+    document.addEventListener("click",e=>{
+      if(e.target.closest("[data-weekly-actual]")){weeklyActualDialog();return;}
+      const task=state.tasks.find(t=>t.id===document.getElementById("actual-log-task")?.value);
+      const load=e.target.closest("[data-load-actual]");
+      if(load&&task){const r=task.actualHistory.find(r=>r.date===load.dataset.loadActual);for(const [id,key] of [["date","date"],["progress","progress"],["cost","cost"],["note","note"]])document.getElementById(`actual-log-${id}`).value=r[key];return;}
+      const remove=e.target.closest("[data-delete-actual]");
+      if(remove&&task&&confirm("ลบงวดนี้? สำรองหรือ Undo เพื่อกู้คืนได้")){task.actualHistory=task.actualHistory.filter(r=>r.date!==remove.dataset.deleteActual);syncActualLog(task);saveState(true);renderAll();weeklyActualDialog(task.id);return;}
+      if(e.target.closest("[data-save-actual]")&&task){
+        const date=document.getElementById("actual-log-date").value,progress=Number(document.getElementById("actual-log-progress").value),cost=Number(document.getElementById("actual-log-cost").value),error=document.getElementById("actual-log-error");
+        if(!isISODate(date)||date>state.project.dataDate||!Number.isFinite(progress)||progress<0||progress>100||!Number.isFinite(cost)||cost<0){error.textContent="ตรวจวันที่ (ไม่เกิน Data Date), % 0–100 และค่าใช้จ่ายไม่ติดลบ";return;}
+        const record={date,progress,cost,note:document.getElementById("actual-log-note").value.trim()};
+        const records=normalizeActualHistory([...task.actualHistory.filter(r=>r.date!==date),record]);
+        if(records.some((r,i)=>i>0&&(r.progress<records[i-1].progress||r.cost<records[i-1].cost))){error.textContent="ยอดสะสมต้องไม่ลดลงจากงวดก่อน และไม่เกินงวดถัดไป กรุณาแก้ประวัติที่เกี่ยวข้องด้วย";return;}
+        task.actualHistory=records;syncActualLog(task);saveState(true);renderAll();weeklyActualDialog(task.id);showToast("บันทึกประวัติ Actual แล้ว","success");
+      }
+      if(e.target.closest("[data-confirm-xml]")&&pendingXmlImport){
+        const calendar=document.getElementById("xml-calendar").value;
+        if(!document.getElementById("xml-ack").checked){document.getElementById("xml-error").textContent="ยืนยันข้อจำกัดและสำรองข้อมูลก่อนนำเข้า";return;}
+        const backup={...state,exportedAt:new Date().toISOString()};downloadBlob(JSON.stringify(backup,null,2),`${slugify(state.project.name)}-before-xml.json`,"application/json");
+        state=normalizeState(pendingXmlImport);state.project.calendar=calendar;pendingXmlImport=null;saveState(true);renderAll();setView("schedule",false);document.getElementById("pilot-dialog").close();showToast("นำเข้าแล้ว พร้อมสำรองโครงการเดิม","success");
+      }
+    });
   }
 
   function renderCostByStatus() {
@@ -1392,7 +1482,7 @@
   }
 
   function manpowerFor(task) {
-    return Number.isFinite(Number(task?.manpower)) && Number(task.manpower) > 0 ? Number(task.manpower) : defaultManpower(task?.owner);
+    return task?.manpower != null && Number.isFinite(Number(task.manpower)) && Number(task.manpower) >= 0 ? Number(task.manpower) : defaultManpower(task?.owner);
   }
 
   function resourceSeries(schedule) {
@@ -1400,7 +1490,7 @@
     const days = Array.from({ length: Math.max(1, schedule.projectFinishIndex + 1) }, (_, day) => {
       const byTeam = Object.fromEntries(teams.map((team) => [team, 0]));
       schedule.rows.forEach((row) => {
-        if (!row.task.milestone && day >= row.es && day <= row.ef && isProjectWorkday(addDays(schedule.projectStart,day))) byTeam[row.task.resourceTeam || row.task.owner || "General crew"] += manpowerFor(row.task);
+        if (!row.task.summary && !row.task.milestone && day >= row.es && day <= row.ef && isProjectWorkday(addDays(schedule.projectStart,day))) byTeam[row.task.resourceTeam || row.task.owner || "General crew"] += manpowerFor(row.task);
       });
       return { day, byTeam, total: Object.values(byTeam).reduce((a, b) => a + b, 0) };
     });
@@ -1408,7 +1498,16 @@
   }
 
   function renderResources(schedule) {
-    const series = resourceSeries(schedule);
+    let controls=document.getElementById("resource-controls");
+    if(!controls){controls=document.createElement("div");controls.id="resource-controls";controls.className="control09-toolbar";controls.innerHTML=`<label>ตั้งแต่<input id="resource-from" type="date"></label><label>ถึง<input id="resource-to" type="date"></label><label>ทีม<select id="resource-team"></select></label><button id="resource-clear">แสดงทั้งโครงการ</button>`;document.getElementById("resource-kpis").before(controls);}
+    const selected=document.getElementById("resource-team").value||"all";
+    const teamNames=[...new Set(schedule.rows.filter(r=>!r.task.summary).map(r=>r.task.resourceTeam||r.task.owner||"General crew"))];
+    document.getElementById("resource-team").innerHTML=`<option value="all">ทุกทีม</option>${teamNames.map(t=>`<option value="${escapeAttr(t)}" ${t===selected?"selected":""}>${escapeHtml(t)}</option>`).join("")}`;
+    const from=document.getElementById("resource-from").value,to=document.getElementById("resource-to").value;
+    const filtered={...schedule,rows:schedule.rows.filter(r=>!r.task.summary&&(selected==="all"||(r.task.resourceTeam||r.task.owner||"General crew")===selected))};
+    const raw=resourceSeries(filtered),series={...raw,days:raw.days.filter(d=>{const date=toISO(addDays(schedule.projectStart,d.day));return (!from||date>=from)&&(!to||date<=to);})};
+    for(const id of ["resource-from","resource-to","resource-team"])document.getElementById(id).onchange=()=>renderResources(currentSchedule);
+    document.getElementById("resource-clear").onclick=()=>{document.getElementById("resource-from").value="";document.getElementById("resource-to").value="";document.getElementById("resource-team").value="all";renderResources(currentSchedule);};
     const capacity = Number(state.project.resourceCapacity || 70);
     const peak = Math.max(0, ...series.days.map((day) => day.total));
     const overloadDays = series.days.filter((day) => day.total > capacity).length;
@@ -1422,23 +1521,50 @@
     const colors = ["#2f6fb3","#3c9a61","#c77531","#8b6bbd","#c4a036","#5c7d8f","#d65c5c","#46a3a3"];
     document.getElementById("resource-legend").innerHTML = series.teams.map((team,i)=>`<span><i class="resource-key" style="background:${colors[i%colors.length]}"></i>${escapeHtml(team)}</span>`).join("") + `<span><i class="capacity-key"></i>Capacity ${capacity}</span>`;
     const width=1100,height=360,left=48,right=20,top=18,bottom=45,plotW=width-left-right,plotH=height-top-bottom,maxY=Math.max(capacity,peak,1)*1.15;
-    const barW=Math.max(2,plotW/series.days.length-1), x=(i)=>left+i*plotW/series.days.length, y=(v)=>top+plotH-v/maxY*plotH;
+    const barW=Math.max(.25,plotW/Math.max(1,series.days.length)-1), x=(i)=>left+i*plotW/Math.max(1,series.days.length), y=(v)=>top+plotH-v/maxY*plotH;
     const bars=series.days.map((day,i)=>{let cumulative=0;return series.teams.map((team,t)=>{const value=day.byTeam[team];const yTop=y(cumulative+value),h=y(cumulative)-yTop;cumulative+=value;return value?`<rect x="${x(i)}" y="${yTop}" width="${barW}" height="${Math.max(.5,h)}" fill="${colors[t%colors.length]}"><title>${escapeHtml(formatDate(addDays(schedule.projectStart,day.day),true))} · ${escapeHtml(team)} ${value} people · total ${day.total}</title></rect>`:"";}).join("");}).join("");
     const tickStep=Math.max(1,Math.ceil(series.days.length/12));
-    document.getElementById("resource-histogram").innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Stacked daily resource histogram"><line class="capacity-line" x1="${left}" x2="${width-right}" y1="${y(capacity)}" y2="${y(capacity)}"></line><text class="capacity-label" x="${width-right}" y="${y(capacity)-6}" text-anchor="end">Capacity ${capacity}</text>${bars}${series.days.filter((_,i)=>i%tickStep===0).map((d)=>`<text class="chart-axis-text" x="${x(d.day)}" y="${height-15}" text-anchor="middle">${escapeHtml(formatDate(addDays(schedule.projectStart,d.day)))}</text>`).join("")}</svg>`;
-    document.getElementById("resource-table-body").innerHTML=[...schedule.rows].sort((a,b)=>manpowerFor(b.task)*b.duration-manpowerFor(a.task)*a.duration).map((row)=>{const manpower=manpowerFor(row.task),pd=manpower*row.duration;const status=manpower>capacity?"Over capacity":manpower>capacity*.7?"High":"Normal";return `<tr><td><span class="id-pill">${escapeHtml(row.task.id)}</span></td><td class="task-cell"><strong>${escapeHtml(row.task.name)}</strong><small>${escapeHtml(row.task.wbs||"General")}</small></td><td>${escapeHtml(row.task.resourceTeam||row.task.owner)}</td><td class="numeric">${manpower}</td><td class="numeric">${row.duration}d</td><td class="numeric"><strong>${pd.toLocaleString()}</strong></td><td>${formatDate(row.startDate)}</td><td>${formatDate(row.endDate)}</td><td><span class="load-pill ${status==='Normal'?'good':status==='High'?'warn':'bad'}">${status}</span></td></tr>`;}).join("");
+    document.getElementById("resource-histogram").innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Stacked daily resource histogram"><line class="capacity-line" x1="${left}" x2="${width-right}" y1="${y(capacity)}" y2="${y(capacity)}"></line><text class="capacity-label" x="${width-right}" y="${y(capacity)-6}" text-anchor="end">Capacity ${capacity}</text>${bars}${series.days.map((d,i)=>i%tickStep===0?`<text class="chart-axis-text" x="${x(i)}" y="${height-15}" text-anchor="middle">${escapeHtml(formatDate(addDays(schedule.projectStart,d.day)))}</text>`:"").join("")}</svg>${!series.days.length?"<p>ไม่พบข้อมูลในช่วงที่เลือก</p>":""}<p class="pilot-note">${selected==="all"?"ทุกทีม":"ทีมที่เลือก"} · Capacity เป็นกำลังคนรวมโครงการ · แสดง loading ตามแผน ไม่ใช่ Resource Leveling อัตโนมัติ</p>`;
+    document.getElementById("resource-table-body").innerHTML=filtered.rows.filter(r=>(!from||toISO(r.endDate)>=from)&&(!to||toISO(r.startDate)<=to)).map((row)=>{const manpower=row.task.milestone?0:manpowerFor(row.task),days=series.days.filter(d=>d.day>=row.es&&d.day<=row.ef&&isProjectWorkday(addDays(schedule.projectStart,d.day))).length,pd=manpower*days;const overloaded=manpower>0&&series.days.some(d=>d.day>=row.es&&d.day<=row.ef&&d.total>capacity);const status=overloaded?"Concurrent overload":"Normal";return `<tr data-edit-task="${escapeAttr(row.task.id)}"><td><span class="id-pill">${escapeHtml(row.task.id)}</span></td><td class="task-cell"><strong>${escapeHtml(row.task.name)}</strong><small>${escapeHtml(row.task.wbs||"General")}</small></td><td>${escapeHtml(row.task.resourceTeam||row.task.owner)}</td><td class="numeric">${manpower}</td><td class="numeric">${row.task.milestone?0:days}d</td><td class="numeric"><strong>${pd.toLocaleString()}</strong></td><td>${formatDate(row.startDate)}</td><td>${formatDate(row.endDate)}</td><td><span class="load-pill ${overloaded?'bad':'good'}">${status}</span></td></tr>`;}).join("");
+    let overload=document.getElementById("resource-overload-register");if(!overload){overload=document.createElement("section");overload.id="resource-overload-register";overload.className="panel table-scroll";document.getElementById("resource-histogram").closest(".panel").after(overload);}
+    overload.innerHTML=`<h3>วันที่กำลังคนเกิน Capacity · ${overloadDays} วัน</h3><p>ตรวจทีมและกิจกรรมที่ทำพร้อมกันก่อนปรับลำดับงาน</p><table class="data-table"><thead><tr><th>วันที่</th><th>คน / เกิน</th><th>กิจกรรมร่วมวันนั้น</th></tr></thead><tbody>${series.days.filter(d=>d.total>capacity).map(d=>`<tr><td>${formatDate(addDays(schedule.projectStart,d.day),true)}</td><td>${d.total} / +${d.total-capacity}</td><td>${filtered.rows.filter(r=>!r.task.milestone&&d.day>=r.es&&d.day<=r.ef).map(r=>`<button data-edit-task="${escapeAttr(r.task.id)}">${escapeHtml(r.task.id)} · ${manpowerFor(r.task)}</button>`).join(" ")}</td></tr>`).join("")||'<tr><td colspan="3">ไม่มีวันที่เกินกำลังในตัวกรองนี้</td></tr>'}</tbody></table>`;
   }
 
   function renderLookahead(schedule) {
     const dataDate = state.project.dataDate ? fromISO(state.project.dataDate) : startOfDay(new Date());
     const weeks = Array.from({length:3},(_,i)=>({start:addDays(dataDate,i*7),end:addDays(dataDate,i*7+6),label:i===0?"This week":`In ${i} week${i>1?"s":""}`}));
-    const byWeek = weeks.map((week)=>schedule.rows.filter((row)=>row.startDate<=week.end&&row.endDate>=week.start&&row.task.progress<100));
+    const owner = document.getElementById("lookahead-owner")?.value || "all";
+    const mode = document.getElementById("lookahead-mode")?.value || "all";
+    const eligible=row=>!row.task.summary && row.task.progress<100 && (owner==="all"||row.task.owner===owner) && (mode!=="critical"||row.critical) && (mode!=="blocked"||readinessFor(row,schedule).length>0);
+    const byWeek = weeks.map((week,i)=>schedule.rows.filter((row)=>eligible(row)&&row.startDate<=week.end&&(row.endDate>=week.start||i===0&&row.endDate<dataDate)));
     const unique = new Set(byWeek.flat().map((row)=>row.task.id));
     const critical = [...unique].filter((id)=>schedule.byId.get(id.toUpperCase())?.critical).length;
-    const peak = Math.max(0,...byWeek.map((rows)=>rows.reduce((s,row)=>s+manpowerFor(row.task),0)));
+    const resources=resourceSeries(schedule);
+    const peak = Math.max(0,...resources.days.filter(d=>{const date=addDays(schedule.projectStart,d.day);return date>=dataDate&&date<=weeks[2].end;}).map(d=>d.total));
+    let controls=document.getElementById("lookahead-controls");
+    if(!controls){controls=document.createElement("div");controls.id="lookahead-controls";controls.className="control09-toolbar";document.getElementById("lookahead-summary").before(controls);}
+    controls.innerHTML=`<label>ผู้รับผิดชอบ<select id="lookahead-owner"><option value="all">ทุกคน</option>${[...new Set(state.tasks.map(t=>t.owner))].map(o=>`<option ${o===owner?"selected":""} value="${escapeAttr(o)}">${escapeHtml(o)}</option>`).join("")}</select></label><label>แสดง<select id="lookahead-mode"><option value="all">ทั้งหมด</option><option value="critical">Critical</option><option value="blocked">มีข้อจำกัด / ไม่พร้อม</option></select></label><button id="lookahead-report-print">พิมพ์รายงานประชุม</button>`;
+    document.getElementById("lookahead-mode").value=mode;
+    for(const id of ["lookahead-owner","lookahead-mode"])document.getElementById(id).onchange=()=>renderLookahead(currentSchedule);
+    document.getElementById("lookahead-report-print").onclick=()=>printView("lookahead");
     document.getElementById("lookahead-subtitle").textContent=`From Data Date ${formatDate(dataDate,true)} · for weekly site coordination`;
-    document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activities",value:String(unique.size),icon:"▦",iconClass:"blue",metaLeft:"Across 21 days",metaRight:`${critical} critical`}),kpiCard({label:"Critical work",value:String(critical),icon:"!",iconClass:critical?"red":"green",metaLeft:"Zero total float",metaClass:critical?"bad":"good",metaRight:"Prioritize constraints"}),kpiCard({label:"Peak weekly crews",value:`${peak} people`,icon:"↑",iconClass:peak>state.project.resourceCapacity?"red":"green",metaLeft:`Capacity ${state.project.resourceCapacity}/day`,metaRight:peak>state.project.resourceCapacity?"Review loading":"Within limit"})].join("");
-    document.getElementById("lookahead-board").innerHTML=weeks.map((week,i)=>`<section class="lookahead-column"><header><div><span>${week.label}</span><small>${formatDate(week.start)} – ${formatDate(week.end)}</small></div><strong>${byWeek[i].length}</strong></header><div class="lookahead-cards">${byWeek[i].length?byWeek[i].map((row)=>{const status=row.critical?"Critical":row.slack<=5?"Near-critical":row.startDate<week.start?"Continuing":"Starting";return `<article class="lookahead-card ${row.critical?"critical":row.slack<=5?"near":""}" data-edit-task="${escapeAttr(row.task.id)}"><div class="lookahead-card-top"><span>${escapeHtml(row.task.id)}</span><b>${status}</b></div><h4>${escapeHtml(row.task.name)}</h4><p>${escapeHtml(row.task.wbs||"General")}</p><div class="lookahead-progress"><span style="width:${row.task.progress}%"></span></div><div class="lookahead-meta"><span>${escapeHtml(row.task.resourceTeam||row.task.owner)} · ${manpowerFor(row.task)} people</span><strong>${row.task.progress}%</strong></div><small>${formatDate(row.startDate)} – ${formatDate(row.endDate)} · TF ${row.slack}d</small></article>`;}).join(""):`<div class="empty-state">No active work</div>`}</div></section>`).join("");
+document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activities",value:String(unique.size),icon:"▦",iconClass:"blue",metaLeft:"Across 21 days",metaRight:`${critical} critical`}),kpiCard({label:"Critical work",value:String(critical),icon:"!",iconClass:critical?"red":"green",metaLeft:"Zero total float",metaClass:critical?"bad":"good",metaRight:"Prioritize constraints"}),kpiCard({label:"Peak daily crews (21d)",value:`${peak} people`,icon:"↑",iconClass:peak>state.project.resourceCapacity?"red":"green",metaLeft:`Capacity ${state.project.resourceCapacity}/day`,metaRight:peak>state.project.resourceCapacity?"Review loading":"Within limit"})].join("");
+    document.getElementById("lookahead-board").innerHTML=weeks.map((week,i)=>`<section class="lookahead-column"><header><div><span>${week.label}</span><small>${formatDate(week.start)} – ${formatDate(week.end)}</small></div><strong>${byWeek[i].length}</strong></header><div class="lookahead-cards">${byWeek[i].length?byWeek[i].map((row)=>{const status=row.endDate<dataDate?"งานค้าง / Overdue":row.critical?"Critical":row.slack<=5?"Near-critical":row.startDate<week.start?"Continuing":"Starting";const gates=readinessFor(row,schedule);return `<article class="lookahead-card ${row.critical?"critical":row.slack<=5?"near":""}" data-edit-task="${escapeAttr(row.task.id)}"><div class="lookahead-card-top"><span>${escapeHtml(row.task.id)}</span><b>${status}</b></div><h4>${escapeHtml(row.task.name)}</h4><p>${escapeHtml(row.task.wbs||"General")}</p><p class="${gates.length?'bad':'good'}">${gates.length?escapeHtml(gates.join(" · ")):"พร้อมตามข้อมูลที่บันทึก"}</p>${row.task.constraint?`<p>แก้โดย ${escapeHtml(row.task.constraintOwner||row.task.owner)} · ${escapeHtml(row.task.constraintDue||"ไม่ระบุกำหนด")}</p>`:""}<div class="lookahead-progress"><span style="width:${row.task.progress}%"></span></div><div class="lookahead-meta"><span>${escapeHtml(row.task.owner)} · ${manpowerFor(row.task)} people</span><strong>${row.task.progress}%</strong></div><small>${formatDate(row.startDate)} – ${formatDate(row.endDate)} · TF ${row.slack}d</small></article>`;}).join(""):`<div class="empty-state">No active work</div>`}</div></section>`).join("");
+    let report=document.getElementById("lookahead-report");if(!report){report=document.createElement("section");report.id="lookahead-report";report.className="panel table-scroll";document.getElementById("lookahead-board").after(report);}
+    report.innerHTML=`<h3>รายงานประสานงาน 3 สัปดาห์ · ${formatDate(dataDate,true)}</h3><p>Peak เป็นกำลังคนรายวันของแผนทั้งโครงการ ไม่ใช่ผลรวมทุกงานในสัปดาห์ งานค้างยังไม่ถูกเพิ่มกำลังคนใน Histogram จนกว่าจะปรับ Forecast/แผน</p><table class="data-table"><thead><tr><th>ID / งาน</th><th>ผู้รับผิดชอบ</th><th>เริ่ม–จบ</th><th>% / TF</th><th>ข้อจำกัด / เงื่อนไข</th><th>ผู้แก้ / กำหนด</th></tr></thead><tbody>${[...new Map(byWeek.flat().map(r=>[r.task.id,r])).values()].map(r=>`<tr><td>${escapeHtml(r.task.id+" · "+r.task.name)}</td><td>${escapeHtml(r.task.owner)}</td><td>${formatDate(r.startDate)} – ${formatDate(r.endDate)}</td><td>${r.task.progress}% / ${r.slack}d</td><td>${escapeHtml(readinessFor(r,schedule).join(" · ")||"พร้อมตามข้อมูล")}</td><td>${escapeHtml(r.task.constraintOwner)} / ${escapeHtml(r.task.constraintDue)}</td></tr>`).join("")}</tbody></table>`;
+  }
+
+  function readinessFor(row,schedule) {
+    const gates=[];
+    if(!row.task.ready)gates.push("ยังไม่พร้อม");
+    if(row.task.constraint)gates.push(row.task.constraint);
+    for(const p of row.predecessors||[]){const pred=schedule.byId.get(p.id);if(!pred)continue;
+      const started=pred.task.actualStart||pred.task.progress>0,finished=pred.task.progress>=100||pred.task.actualFinish;
+      if((p.type==="FS"||p.type==="FF")&&!finished)gates.push(`${p.id}${p.type}: ยังไม่จบ${p.type==="FF"?" (เงื่อนไขจบงาน)":""}`);
+      if((p.type==="SS"||p.type==="SF")&&!started)gates.push(`${p.id}${p.type}: ยังไม่เริ่ม${p.type==="SF"?" (เงื่อนไขจบงาน)":""}`);
+      if(p.lag)gates.push(`${p.id}${p.type}${p.lag>0?"+":""}${p.lag}: ตรวจ Lag/Lead กับวันที่แผน/Forecast`);
+    }
+    return gates;
   }
 
   function renderSettings() {
@@ -1474,9 +1600,17 @@
     document.getElementById("task-predecessor").value = task?.predecessor || "";
     document.getElementById("task-cost").value = task?.cost ?? 0;
     document.getElementById("task-actual-cost").value = task?.actualCost ?? 0;
+    document.getElementById("task-actual-cost").disabled=Boolean(task?.actualHistory?.length);
+    document.getElementById("task-progress").disabled=Boolean(task?.actualHistory?.length);
     document.getElementById("task-progress").value = task?.progress ?? 0;
     document.getElementById("task-status").value = task?.status || "backlog";
     document.getElementById("task-notes").value = task?.notes || "";
+    let logNote=document.getElementById("task-log-note");if(!logNote){logNote=document.createElement("p");logNote.id="task-log-note";logNote.className="pilot-note";document.getElementById("task-notes").closest("label").after(logNote);}
+    logNote.textContent=task?.actualHistory?.length?"กิจกรรมนี้มีประวัติ Actual: แก้ % / ค่าใช้จ่ายผ่านปุ่ม Actual รายสัปดาห์ เพื่อให้กราฟและรายงานตรงกัน":"ค่า % และค่าใช้จ่ายที่กรอกจะแสดงเป็น snapshot ณ Data Date; ใช้ Actual รายสัปดาห์เพื่อบันทึกย้อนหลัง";
+    document.getElementById("task-constraint").value = task?.constraint || "";
+    document.getElementById("task-constraint-owner").value = task?.constraintOwner || task?.owner || "";
+    document.getElementById("task-constraint-due").value = task?.constraintDue || "";
+    document.getElementById("task-ready").checked = task?.ready !== false;
     document.getElementById("task-form-error").textContent = "";
     document.getElementById("delete-task-button").hidden = !task;
     document.getElementById("modal-backdrop").hidden = false;
@@ -1548,6 +1682,11 @@
       plannedFinish,
       actualStart,
       actualFinish,
+      actualHistory: originalId ? state.tasks.find(item=>item.id.toUpperCase()===originalId)?.actualHistory || [] : [],
+      constraint: document.getElementById("task-constraint").value.trim(),
+      constraintOwner: document.getElementById("task-constraint-owner").value.trim(),
+      constraintDue: document.getElementById("task-constraint-due").value,
+      ready: document.getElementById("task-ready").checked,
       outlineLevel: originalId ? state.tasks.find(item => item.id.toUpperCase() === originalId)?.outlineLevel || 1 : 1,
       summary: originalId ? Boolean(state.tasks.find(item => item.id.toUpperCase() === originalId)?.summary) : false,
       predecessor,
@@ -1560,6 +1699,7 @@
       baselineFinish: originalId ? state.tasks.find((item) => item.id.toUpperCase() === originalId)?.baselineFinish || "" : "",
       baselineCost: originalId ? state.tasks.find((item) => item.id.toUpperCase() === originalId)?.baselineCost || 0 : 0
     };
+    if(task.actualHistory.length)syncActualLog(task);
 
     if (originalId) {
       const index = state.tasks.findIndex((item) => item.id.toUpperCase() === originalId);
@@ -1627,6 +1767,7 @@
   function updateTaskProgress(taskId, progress) {
     const task = state.tasks.find((item) => item.id.toUpperCase() === taskId.toUpperCase());
     if (!task) return;
+    if(task.actualHistory?.length){weeklyActualDialog(task.id);return;}
     task.progress = clampNumber(progress, 0, 100, 0);
     if (task.progress === 100) task.status = "done";
     else if (task.status === "done") task.status = task.progress >= 80 ? "review" : "in-progress";
@@ -1638,6 +1779,7 @@
     if (!STATUS_ORDER.includes(status)) return;
     const task = state.tasks.find((item) => item.id.toUpperCase() === taskId.toUpperCase());
     if (!task || task.status === status) return;
+    if(task.actualHistory?.length){weeklyActualDialog(task.id);return;}
     task.status = status;
     if (status === "done") task.progress = 100;
     else if (task.progress === 100) task.progress = status === "review" ? 90 : 75;
@@ -1648,6 +1790,8 @@
 
   function handleProjectSettings(event) {
     event.preventDefault();
+    const holidayInput=document.getElementById("settings-holidays").value.split(/[\s,;]+/).filter(Boolean);
+    if(holidayInput.some(d=>!isISODate(d))){showToast("วันหยุดใช้วันที่จริงรูปแบบ YYYY-MM-DD","error");return;}
     state.project.name = document.getElementById("settings-project-name").value.trim() || "Untitled project";
     state.project.startDate = document.getElementById("settings-project-start").value;
     state.project.currency = document.getElementById("settings-currency").value;
@@ -1660,6 +1804,7 @@
     state.project.holidays = [...new Set(holidays)];
     state.project.forecast = document.getElementById("settings-forecast").checked;
     state.project.note = document.getElementById("settings-note").value.trim();
+    state.tasks.filter(t=>t.actualHistory?.length).forEach(syncActualLog);
     saveState();
     renderAll();
     showToast("Project settings updated.", "success");
@@ -1693,7 +1838,7 @@
     reader.readAsText(file);
   }
 
-  function importMicrosoftProjectXml(event) {
+  function importMicrosoftProjectXml(event, onPreview = null) {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -1702,6 +1847,7 @@
         const xml = new DOMParser().parseFromString(String(reader.result), "application/xml");
         if (xml.querySelector("parsererror")) throw new Error("Invalid XML");
         const root = xml.documentElement;
+        if(root.localName!=="Project")throw new Error("Expected Microsoft Project Project element");
         const direct = (node, name) => [...(node?.children || [])].find((child) => child.localName === name);
         const children = (node, name) => [...(node?.children || [])].filter((child) => child.localName === name);
         const textOf = (node, name, fallback = "") => direct(node, name)?.textContent?.trim() || fallback;
@@ -1716,21 +1862,26 @@
           if (!assignments.has(taskUid)) assignments.set(taskUid, []);
           assignments.get(taskUid).push({ name: resources.get(resourceUid) || "Resource", units });
         });
-        const taskNodes = children(direct(root, "Tasks"), "Task").filter((node) => textOf(node, "UID") !== "0");
+        const taskNodes = children(direct(root, "Tasks"), "Task").filter((node) => textOf(node, "UID") !== "0" && textOf(node,"Null","0")!=="1");
+        if(new Set(taskNodes.map(n=>textOf(n,"UID"))).size!==taskNodes.length || new Set(taskNodes.map(n=>textOf(n,"ID",textOf(n,"UID")))).size!==taskNodes.length)throw new Error("Duplicate Task UID/ID");
+        const importWarnings = [];
         const uidToId = new Map(taskNodes.map((node) => [textOf(node, "UID"), `MSP${textOf(node, "ID", textOf(node, "UID"))}`]));
         const tasks = taskNodes.map((node) => {
           const uid = textOf(node, "UID"), start = textOf(node, "Start").slice(0, 10), finish = textOf(node, "Finish").slice(0, 10);
           const duration = parseMspDuration(textOf(node, "Duration"), minutesPerDay, start, finish);
           const links = children(node, "PredecessorLink").map((link) => {
             const predId = uidToId.get(textOf(link, "PredecessorUID"));
-            if (!predId) return "";
+            if (!predId) { importWarnings.push(`Task ${uid}: missing predecessor UID ${textOf(link,"PredecessorUID")}`); return ""; }
             const type = ({ "0": "FF", "1": "FS", "2": "SF", "3": "SS" })[textOf(link, "Type", "1")] || "FS";
             const lag = Math.round((Number(textOf(link, "LinkLag", "0")) || 0) / 10 / minutesPerDay);
+            if(Number(textOf(link,"LinkLag","0"))/10/minutesPerDay!==lag)importWarnings.push(`Task ${uid}: fractional lag rounded to ${lag} day(s)`);
             return `${predId}${type}${lag > 0 ? `+${lag}` : lag < 0 ? lag : ""}`;
           }).filter(Boolean);
           const assigned = assignments.get(uid) || [];
           const baselineContainer = direct(node, "Baselines");
-          const baseline = children(baselineContainer, "Baseline").find((item) => textOf(item, "Number", "0") === "0") || children(baselineContainer, "Baseline")[0];
+          const baselines = [...children(node,"Baseline"),...children(baselineContainer,"Baseline")];
+          const baseline = baselines.find(item=>textOf(item,"Number","0")==="0") || baselines[0];
+          if(duration>999)importWarnings.push(`Task ${uid}: duration exceeds 999-day application limit`);
           const progress = clampNumber(textOf(node, "PercentComplete", "0"), 0, 100, 0);
           const summary = textOf(node, "Summary", "0") === "1";
           return {
@@ -1762,8 +1913,7 @@
         });
         if (!tasks.length) throw new Error("No tasks found");
         const summaryCount = tasks.filter((task) => task.summary).length;
-        if (!window.confirm(`Import ${tasks.length} Microsoft Project tasks (${summaryCount} summary tasks)? This replaces the current browser project data.`)) return;
-        state = normalizeState({
+        pendingXmlImport = normalizeState({
           project: {
             name: textOf(root, "Title", textOf(root, "Name", file.name.replace(/\.xml$/i, ""))),
             startDate: projectStart,
@@ -1771,18 +1921,31 @@
             budget: tasks.reduce((sum, task) => sum + (task.summary ? 0 : task.cost), 0),
             currency: textOf(root, "CurrencyCode", "THB"),
             resourceCapacity: state.project.resourceCapacity || 70,
+            calendar: state.project.calendar,
+            holidays: state.project.holidays,
             note: `Imported from Microsoft Project XML: ${file.name}`
           },
           tasks,
           ui: { ...state.ui, activeView: "schedule" }
         });
-        saveState(true);
-        renderAll();
-        setView("schedule", false);
-        showToast(`Imported ${tasks.length} tasks from Microsoft Project XML.`, "success");
+        if(onPreview){onPreview({candidate:pendingXmlImport,warnings:importWarnings});return;}
+        const previous=state;let comparison;
+        try { state=pendingXmlImport;comparison=buildSchedule(); } finally { state=previous; }
+        const shifted=comparison.rows.filter(row=>row.task.plannedStart&&toISO(row.startDate)!==row.task.plannedStart||row.task.plannedFinish&&toISO(row.endDate)!==row.task.plannedFinish);
+        pilotDialog("MS Project XML — พรีวิวก่อนนำเข้า", `<p><b>${tasks.length} กิจกรรม · ${summaryCount} Summary · ${tasks.filter(t=>t.milestone).length} Milestone</b><br>${tasks.filter(t=>t.baselineStart).length} Baseline · ${assignmentNodes.length} Assignments · ${tasks.filter(t=>t.predecessor).length} งานมี dependency</p><p>รองรับ: WBS/Outline, วันที่แผน, FS/FF/SS/SF, progress, cost, Actual dates และ Baseline 0</p><div class="xml-warnings"><b>ข้อจำกัดที่ต้องตรวจ</b><ul><li>ปฏิทินราย Task/Resource, exceptions, time-of-day, elapsed duration และ constraints ของ MS Project ยังไม่ถ่ายโอน ใช้ปฏิทินร่วมที่เลือกด้านล่าง</li><li>Lag เศษวันปัดเป็นวันเต็ม Assignment units ไม่ใช่จำนวนคนโดยตรง กรุณาตรวจ manpower</li><li>ไม่แปลงประวัติ Actual รายงวดจาก XML ค่า Actual ที่นำเข้าจะเป็น snapshot ณ Status Date</li><li>ผลเปรียบเทียบด้านล่างใช้ปฏิทิน ${escapeHtml(pendingXmlImport.project.calendar)} ที่เปิดอยู่ ไม่รับรองผลเหมือน MS Project</li></ul>${importWarnings.map(w=>`<p>${escapeHtml(w)}</p>`).join("")}${comparison.issues.map(i=>`<p>${escapeHtml(i.taskId+": "+i.message)}</p>`).join("")}</div><label>ปฏิทินร่วมหลังนำเข้า<select id="xml-calendar"><option value="calendar">7 วัน / Calendar</option><option value="work6">จันทร์–เสาร์</option><option value="work5">จันทร์–ศุกร์</option></select></label><p>${shifted.length} งานที่วันคำนวณต่างจากต้นฉบับ</p><div class="table-scroll"><table class="data-table"><thead><tr><th>ID / WBS</th><th>กิจกรรม</th><th>XML Start / Finish</th><th>GO Start / Finish</th><th>ประเภท / Dependency</th><th>Baseline 0</th></tr></thead><tbody>${comparison.rows.map(r=>`<tr><td>${escapeHtml(r.task.id)}<br>${escapeHtml(r.task.wbs)}</td><td>${escapeHtml(r.task.name)}</td><td>${escapeHtml(r.task.plannedStart)}<br>${escapeHtml(r.task.plannedFinish)}</td><td>${toISO(r.startDate)}<br>${toISO(r.endDate)}</td><td>${r.task.summary?"Summary":r.task.milestone?"Milestone":"Task"}<br>${escapeHtml(r.task.predecessor)}</td><td>${escapeHtml(r.task.baselineStart)}<br>${escapeHtml(r.task.baselineFinish)}</td></tr>`).join("")}</tbody></table></div><label><input type="checkbox" id="xml-ack"> เข้าใจข้อจำกัดและยืนยันแทนที่โครงการปัจจุบัน (ดาวน์โหลด Backup เดิมก่อนแทนที่)</label><p id="xml-error" class="bad" role="alert"></p><button data-confirm-xml>สำรองเดิมและนำเข้า</button><button data-pilot="close">ยกเลิก</button>`);
+        const calendarSelect=document.getElementById("xml-calendar");calendarSelect.value=pendingXmlImport.project.calendar;
+        calendarSelect.addEventListener("change",()=>{
+          pendingXmlImport.project.calendar=calendarSelect.value;
+          const previous=state;let revised;try{state=pendingXmlImport;revised=buildSchedule();}finally{state=previous;}
+          const rows=document.querySelectorAll("#pilot-dialog tbody tr");
+          revised.rows.forEach((r,i)=>{if(rows[i])rows[i].cells[3].innerHTML=`${toISO(r.startDate)}<br>${toISO(r.endDate)}`;});
+          calendarSelect.closest("label").nextElementSibling.textContent=`${revised.rows.filter(r=>toISO(r.startDate)!==r.task.plannedStart||toISO(r.endDate)!==r.task.plannedFinish).length} งานที่วันคำนวณต่างจากต้นฉบับ · ${calendarSelect.value}`;
+          document.getElementById("xml-error").textContent=revised.issues.map(i=>`${i.taskId}: ${i.message}`).join(" · ");
+        });
       } catch (error) {
         console.error(error);
-        showToast("Could not import this Microsoft Project XML file.", "error");
+        if(onPreview)onPreview({error:String(error.message)});
+        else showToast(`Could not import XML: ${error.message}`, "error");
       } finally {
         event.target.value = "";
       }
@@ -1794,6 +1957,7 @@
     const match = String(value || "").match(/^P(?:(\d+)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i);
     if (match) {
       const minutes = Number(match[1] || 0) * minutesPerDay + Number(match[2] || 0) * 60 + Number(match[3] || 0) + Number(match[4] || 0) / 60;
+      if(minutes===0)return 0;
       if (minutes > 0) return Math.max(1, Math.ceil(minutes / minutesPerDay));
     }
     if (isISODate(start) && isISODate(finish)) return Math.max(1, diffDays(fromISO(start), fromISO(finish)) + 1);
@@ -1810,8 +1974,8 @@
       row.task.owner,
       row.task.resourceTeam,
       row.task.manpower,
-      Number(row.task.manpower || 0) * row.duration,
-      row.duration,
+      row.task.summary||row.task.milestone?0:manpowerFor(row.task)*workdaysBetween(row.startDate,row.endDate),
+      row.task.milestone?0:workdaysBetween(row.startDate,row.endDate),
       row.task.predecessor,
       toISO(row.startDate),
       toISO(row.endDate),
@@ -1943,7 +2107,7 @@
   }
 
   function isISODate(value) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(value)) && !Number.isNaN(fromISO(value).getTime());
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value)) && !Number.isNaN(fromISO(value).getTime()) && toISO(fromISO(value))===String(value);
   }
 
   function startOfDay(date) {
@@ -2094,6 +2258,8 @@
     if(!pilotProjects.items.length){pilotProjects.active=crypto.randomUUID();pilotProjects.items=[{id:pilotProjects.active,data:JSON.parse(JSON.stringify(state))}];}
     historySnapshot=JSON.stringify({project:state.project,tasks:state.tasks});
     const bar=document.createElement("div");bar.className="pilot-bar";bar.innerHTML=`<span class="pilot-version">Pilot 0.8 · ข้อมูลในเครื่อง</span><button data-pilot="projects">โครงการ</button><button data-pilot="guide">เริ่มต้น</button><button data-pilot="undo">Undo</button><button data-pilot="redo">Redo</button><button data-pilot="validate">ตรวจข้อมูล</button><button data-pilot="print">ตั้งค่าพิมพ์</button><button data-pilot="feedback">Feedback</button><select id="pilot-language" aria-label="Language"><option value="th">ไทย</option><option value="en">English</option></select>`;
+    bar.querySelector(".pilot-version").textContent="Pilot 0.9 · ข้อมูลในเครื่อง";
+    const logButton=document.createElement("button");logButton.dataset.weeklyActual="";logButton.textContent="Actual รายสัปดาห์";bar.insertBefore(logButton,bar.querySelector("select"));
     document.querySelector(".topbar").after(bar);
     initLanguage();
     const restore=document.createElement("input");restore.type="file";restore.accept=".json";restore.hidden=true;document.body.appendChild(restore);
@@ -2121,8 +2287,9 @@
       }
       if(action==="feedback")pilotDialog("Feedback", `<p>อธิบายปัญหา ขั้นตอนที่ทำ ผลที่คาดหวัง และแนบภาพเมื่อส่งให้ผู้พัฒนา</p><textarea id="pilot-feedback" rows="6" placeholder="เมนู / ขั้นตอน / ผลที่เกิดขึ้น"></textarea><p class="pilot-note">รายงานจะดาวน์โหลดลงเครื่อง ไม่ส่งอัตโนมัติ และไม่แนบข้อมูลโครงการ</p><button data-pilot="download-feedback">ดาวน์โหลดรายงาน</button>`);
       if(action==="download-feedback")downloadPilot("GO-feedback.json",{version:"0.7",date:new Date().toISOString(),message:document.getElementById("pilot-feedback").value});
-      if(action==="print")pilotDialog("ตั้งค่าพิมพ์ / Print", `<p>ใช้แถวที่มองเห็นหลังค้นหาและยุบ WBS ในหน้า Gantt</p><label>กระดาษ <select id="pilot-paper"><option>A3</option><option>A4</option></select></label><label><input id="pilot-register" type="checkbox" checked> รวม Task Register (หน้าใหม่)</label><label><input id="pilot-summary" type="checkbox" checked> รวมตาราง S-Curve</label><p class="pilot-note">ตรวจตัวอย่างในหน้าพิมพ์ของเบราว์เซอร์ก่อนบันทึก PDF</p><button data-pilot="do-print">เปิด Print Preview</button>`);
+      if(action==="print")pilotDialog("ตั้งค่าพิมพ์ / Print", `<p>ใช้แถวและคอลัมน์ที่มองเห็นหลังค้นหาและยุบ WBS ในหน้า Gantt กราฟและตารางสรุปจะย่อร่วมกัน ไม่ตัดส่วนที่อยู่นอกจอ</p><label>กระดาษ <select id="pilot-paper"><option>A3</option><option>A4</option></select></label><label>จัดหน้า<select id="pilot-fit"><option value="page">Gantt + ตารางสรุป พอดีหน้าเดียว</option><option value="width">พอดีความกว้าง (หลายหน้าตามความสูง)</option></select></label><label><input id="pilot-register" type="checkbox" checked> รวม Task Register (หน้าใหม่)</label><label><input id="pilot-summary" type="checkbox" checked> รวมตาราง S-Curve</label><p class="pilot-note">งานจำนวนมากจะมีตัวอักษรเล็กเมื่อย่อหน้าเดียว แนะนำ A3 หรือกรอง/ยุบ WBS และตรวจ Print Preview จริง เปิด Background graphics หากเบราว์เซอร์ปิดสีพื้นหลัง</p><button data-pilot="do-print">เปิด Print Preview</button>`);
       if(action==="do-print"){
+        document.body.dataset.printFit=document.getElementById("pilot-fit").value;
         document.body.classList.toggle("pilot-hide-register",!document.getElementById("pilot-register").checked);document.body.classList.toggle("pilot-hide-summary",!document.getElementById("pilot-summary").checked);
         document.getElementById("print-paper-size").value=document.getElementById("pilot-paper").value;document.getElementById("pilot-dialog").close();printView(state.ui.activeView);
       }
@@ -2133,6 +2300,13 @@
 
   Object.defineProperty(window, "__GO_PLANNER_TEST__", { value: {
     parsePredecessors,
+    normalizeActualHistory,
+    isISODate,
+    importXml(file) { return new Promise(resolve=>importMicrosoftProjectXml({target:{files:[file],value:""}},resolve)); },
+    inspect(tasks,project={}) {
+      const previous=state;
+      try {state=normalizeState({project:{startDate:"2026-01-01",dataDate:"2026-01-21",...project},tasks,ui:{}});const schedule=buildSchedule(),progress=buildProgressSeries(schedule);return {progress,weekly:progressBuckets(schedule,progress,"week"),monthly:progressBuckets(schedule,progress,"month"),cost:buildSCurve(schedule),resource:resourceSeries(schedule),metrics:calculatePerformance(schedule),tasks:state.tasks};}finally{state=previous;}
+    },
     build(tasks, startDate = "2026-01-01", project = {}) {
       const previous = state;
       state = normalizeState({ project: { startDate, ...project }, tasks, ui: {} });

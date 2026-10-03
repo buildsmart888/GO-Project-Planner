@@ -2237,7 +2237,38 @@ code {
 .pilot-issues .error { border-color:#c74646; background:#fff1f1; }
 .pilot-dialog textarea { width:100%; padding:12px; border:1px solid #ccdce7; border-radius:9px; font:inherit; }
 .pilot-dialog label { display:block; margin:16px 0; }
+#schedule-print-sheet { position:absolute; left:-100000px; top:0; }
+.control09-toolbar { display:flex; flex-wrap:wrap; gap:12px; align-items:end; margin-bottom:18px; padding:14px; border:1px solid var(--ink-200); border-radius:12px; background:white; }
+.control09-toolbar label { display:grid; gap:6px; font-size:14px; }
+.control09-toolbar input,.control09-toolbar select,.actual-log-grid input,.pilot-dialog select,.pilot-dialog input:not([type=checkbox]) { padding:9px 11px; border:1px solid var(--ink-200); border-radius:8px; max-width:100%; }
+.control09-toolbar button,.pilot-dialog button { padding:9px 12px; border:1px solid var(--ink-200); border-radius:8px; background:var(--surface); cursor:pointer; }
+.actual-log-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.xml-warnings { padding:16px; background:var(--orange-soft); border-radius:12px; }
+.pilot-dialog .table-scroll { max-height:40vh; overflow:auto; margin-top:18px; }
+.schedule-heading-row { display:flex; flex-direction:column; align-items:stretch; gap:18px; }
+.schedule-heading-row > div:first-child { flex:none; width:100%; min-width:0; }
+.schedule-heading-row h2 { white-space:normal; max-width:none; }
+.schedule-heading-row .toolbar-group { display:flex; flex-wrap:wrap; min-width:0; }
+.main-area,.view,.panel { min-width:0; }
+.pilot-bar { flex-wrap:wrap; height:auto; }
+.print-report-title h2 { margin:0 0 8px; }
+.print-report-title { padding:14px 0; }
+@media(max-width:800px){.actual-log-grid{grid-template-columns:1fr;}.toolbar-group{width:100%;}.pilot-dialog{width:94vw;}.control09-toolbar label{flex:1;min-width:130px;}}
 @media print {
+  .control09-toolbar { display:none !important; }
+  body[data-print-view="schedule"] #schedule-print-sheet { position:static; zoom:var(--report-print-scale,1); break-inside:avoid; display:block !important; }
+  body[data-print-fit="width"] #schedule-print-sheet { break-inside:auto !important; }
+  body[data-print-view="schedule"] #schedule-print-sheet .gantt-inner { zoom:1; }
+  body[data-print-view="schedule"] .schedule-panel,body[data-print-view="schedule"] #view-schedule > .gantt-scurve-panel { display:none !important; }
+  #schedule-print-sheet .gantt-scurve-panel { display:block !important; }
+  #schedule-print-sheet .gantt-header,#schedule-print-sheet .gantt-corner,#schedule-print-sheet .gantt-task-label { position:static !important; }
+  #schedule-print-sheet .progress-matrix { width:100%; table-layout:fixed; }
+  #schedule-print-sheet .progress-matrix th,#schedule-print-sheet .progress-matrix td { overflow-wrap:anywhere; }
+  .table-scroll { max-height:none !important; }
+  .lookahead-card { break-inside:avoid; }
+  #lookahead-report,#resource-overload-register { break-inside:auto; }
+  thead { display:table-header-group; }
+  tr { break-inside:avoid; }
   .pilot-bar,.pilot-dialog { display:none !important; }
   .pilot-hide-register .table-panel,.pilot-hide-summary .gantt-scurve-panel { display:none !important; }
   :root { --sidebar-width: 0px; }

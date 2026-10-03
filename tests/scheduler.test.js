@@ -13,6 +13,8 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync("app.js", "utf8"), sandbox);
 const api = sandbox.window.__GO_PLANNER_TEST__;
+assert.equal(api.isISODate("2026-02-30"),false,"Reject rolled-over calendar dates");
+assert.equal(api.isISODate("2028-02-29"),true,"Accept leap-day dates");
 const task = (id, duration, predecessor = "") => ({ id, name: id, duration, predecessor });
 const row = (schedule, id) => schedule.byId.get(id);
 
@@ -53,7 +55,43 @@ assert.equal(row(s, "D").duration, 4, "planned finish derives inclusive duration
 
 console.log("Scheduler tests passed: FS, SS, FF, SF, lag/lead, multiple, legacy, dates and validation.");
 
-const iso=d=>d.toISOString().slice(0,10);
+const observed={...task("LOG",45),cost:1000,progress:90,actualCost:900,manpower:3,actualHistory:[{date:"2026-01-07",progress:20,cost:100},{date:"2026-01-14",progress:45,cost:280},{date:"2026-02-04",progress:80,cost:650}]};
+let report=api.inspect([observed,{...task("SUMMARY",45),summary:true,cost:1000,manpower:30}],{dataDate:"2026-02-10"});
+assert.equal(report.progress.actual[5],0,"Do not fabricate actual before first observation");
+assert.equal(report.progress.actual[6],20);
+assert.equal(report.progress.actual[12],20,"Hold known cumulative observation");
+assert.equal(report.progress.actual[13],45);
+assert.equal(report.metrics.totalPlanned,1000,"Exclude summary double count");
+assert.equal(report.metrics.earnedValue,800,"Metrics use dated actual history");
+assert.equal(report.metrics.actualCost,650);
+assert.equal(report.monthly.reduce((sum,m)=>sum+m.actual,0),80,"Weekly-to-monthly increments reconcile");
+assert.equal(report.monthly.reduce((sum,m)=>sum+m.cash,0),650,"Cash periods reconcile to cumulative cash");
+assert.equal(report.resource.days[0].total,3,"Summary manpower excluded");
+report=api.inspect([observed],{dataDate:"2026-01-10"});
+assert.equal(report.progress.actual.at(-1),20,"Future records cannot leak through Data Date");
+report=api.inspect([{...task("LEGACY",3),cost:100,progress:50,actualCost:25}],{dataDate:"2026-01-03"});
+assert.equal(report.progress.actual[1],0,"Legacy snapshot does not invent past actual");
+assert.equal(report.progress.actual[2],50);
+report=api.inspect([{...task("ZERO",1),manpower:0}],{dataDate:"2026-01-01"});
+assert.equal(report.resource.days[0].total,0,"Explicit zero manpower is respected");
+console.log("Actual history, snapshot compatibility, monthly reconciliation and summary/resource integrity tests passed.");
+
+// Mock XML DOM tests the importer mapping, not a replacement XML parser.
+const element=(name,value)=>typeof value==="object"?{localName:name,children:Object.entries(value).flatMap(([k,v])=>Array.isArray(v)?v.map(x=>element(k,x)):[element(k,v)])}:{localName:name,textContent:String(value),children:[]};
+const fixture=element("Project",{StartDate:"2026-01-01T08:00:00",StatusDate:"2026-01-14T17:00:00",MinutesPerDay:480,Tasks:{Task:[{UID:0,ID:0},{UID:101,ID:1,Name:"Foundation",Start:"2026-01-01T08:00:00",Finish:"2026-01-03T17:00:00",Duration:"PT24H0M0S",WBS:"1.1",Baseline:{Number:0,Start:"2025-12-30T08:00:00",Finish:"2026-01-01T17:00:00",Cost:100}},{UID:102,ID:2,Name:"Handover",Duration:"PT0H0M0S",Milestone:1,PredecessorLink:[{PredecessorUID:101,Type:1,LinkLag:9600},{PredecessorUID:999,Type:3,LinkLag:0}]}]}});
+sandbox.DOMParser=class{parseFromString(){return {documentElement:fixture,querySelector:()=>null};}};
+sandbox.FileReader=class{readAsText(file){this.result=file.content;this.onload();}};
+api.importXml({name:"fixture.xml",content:"fixture"}).then(result=>{
+  assert.equal(result.candidate.tasks.length,2);
+  assert.equal(result.candidate.tasks[0].id,"MSP1","MSP UID maps through Task ID");
+  assert.equal(result.candidate.tasks[0].baselineStart,"2025-12-30","Read direct Baseline element");
+  assert.equal(result.candidate.tasks[1].duration,0,"Zero duration remains milestone");
+  assert.equal(result.candidate.tasks[1].predecessor,"MSP1FS+2","Tenths of minute converted to project workdays");
+  assert.ok(result.warnings.some(w=>w.includes("999")),"Missing links are warned, not silently lost");
+  console.log("MS Project XML mapping/preview tests passed.");
+}).catch(error=>{console.error(error);process.exitCode=1;});
+
+const iso=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 s=api.build([task('A',2),task('B',1,'AFS')],'2026-01-02',{calendar:'work5'});
 assert.equal(iso(row(s,'A').endDate),'2026-01-05');
 assert.equal(iso(row(s,'B').startDate),'2026-01-06');

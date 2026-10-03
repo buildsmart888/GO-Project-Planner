@@ -1,6 +1,6 @@
 # GO Project Planner
 
-Browser-based construction project planning and control. Pilot release 0.8.
+Browser-based construction project planning and control. Pilot release 0.9.
 <img width="1763" height="1495" alt="image" src="https://github.com/user-attachments/assets/05fd13be-aada-418e-8f48-c7837e58c452" />
 <img width="1763" height="3273" alt="image" src="https://github.com/user-attachments/assets/3ed6fe93-a823-4cfc-a728-fcc99c3c242d" />
 
@@ -55,3 +55,17 @@ Open an issue describing the expected behavior and reproduction steps. Submit ch
 ## License
 
 Licensed under the [MIT License](LICENSE). You may use, modify, redistribute and use commercially, provided the copyright and permission notice are retained. The software is provided as-is without warranty.
+
+
+## Pilot 0.9 — site reporting
+
+
+- A4/A3 landscape print layout fits the full Gantt and horizontal progress table together, with fit-page or fit-width options. Visible WBS rows/columns are respected. Enable background graphics in the browser when needed. Very large reports require filtering/collapsing WBS for legible text.
+- The **Actual รายสัปดาห์** button records cumulative progress and actual cost by period-end date. Re-enter a date to correct it, or load/delete a record. Cumulative values must not decrease across records. Undo and JSON backups include history.
+- Actual curves hold dated observations rather than inventing interpolated history. Tasks without records use a single snapshot at Data Date. Weekly increments roll into the month containing the week-end; actual earned value and actual cash cost are separate rows. Zero-budget projects use duration weights for progress, not fictitious currency values.
+- XML preview shows task/WBS, source dates versus calculated dates, relationship types and Baseline 0 before replacement. Changing the common calendar recalculates comparison dates. The prior project backup downloads before importing.
+- MS Project task/resource calendars, calendar exceptions, constraints and timephased actual data are not imported. Assignment units require manual review before treating them as manpower. Fractional lag is rounded with a warning; missing predecessors are reported.
+- Look Ahead includes unfinished overdue tasks, owner/critical/constraint filters, constraint owner/due date, and a printable coordination register. Dependency checks are advisory; lag/lead and out-of-sequence work need human review.
+- Resource Histogram supports date/team filters and daily concurrent overload details. Workdays, zero manpower and milestones are respected; Summary tasks are excluded from progress/cost/resource totals to avoid double counting. No automatic resource leveling.
+- Validation: scheduler, dated actuals, weekly/monthly reconciliation, summary exclusion and XML mapping tests pass in UTC and Asia/Bangkok. The supplied Master Plan XML was checked (261 tasks, 57 summaries). Browser visual/print-preview QA could not run on this static project in the current managed preview environment; verify real browser Print Preview before contractual issue.
+

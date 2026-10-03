@@ -441,6 +441,10 @@
           <label class="field"><span>Budget cost</span><input id="task-cost" type="number" min="0" step="100" value="0" required /></label>
           <label class="field"><span>Actual cost</span><input id="task-actual-cost" type="number" min="0" step="100" value="0" required /></label>
           <label class="field span-2"><span>Notes</span><textarea id="task-notes" rows="3" placeholder="Deliverable, constraint or acceptance criteria"></textarea></label>
+          <label class="field span-2"><span>ข้อจำกัด / Constraint</span><input id="task-constraint" placeholder="แบบยังไม่อนุมัติ / วัสดุยังไม่เข้า" /></label>
+          <label class="field"><span>ผู้รับผิดชอบแก้ข้อจำกัด</span><input id="task-constraint-owner" /></label>
+          <label class="field"><span>กำหนดปลดข้อจำกัด</span><input id="task-constraint-due" type="date" /></label>
+          <label class="field"><span><input id="task-ready" type="checkbox" checked /> พร้อมเริ่มงาน / Ready</span></label>
         </div>
         <div id="task-form-error" class="form-error" role="alert"></div>
         <div class="modal-actions">
