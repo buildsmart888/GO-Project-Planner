@@ -1996,7 +1996,7 @@ document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activiti
 
   function resetDemo() {
     if (!window.confirm("Replace all local project data with the demonstration project?")) return;
-    state = makeDemoState();
+    state = normalizeState(makeDemoState());
     saveState(true);
     renderAll();
     setView("dashboard", false);
