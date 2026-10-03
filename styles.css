@@ -1269,6 +1269,9 @@ svg {
 .gantt-bar.critical {
   box-shadow: inset 0 0 0 2px var(--red);
 }
+.gantt-bar.milestone-bar { width:18px !important; height:18px; top:13px; border-radius:0; transform:rotate(45deg); background:#355c90; overflow:visible; }
+.gantt-bar.milestone-bar.critical { background:#cf4848; }
+.milestone-bar .gantt-bar-progress,.milestone-bar .gantt-bar-text { display:none; }
 .gantt-bar.near-critical { background: #c8893e; box-shadow: inset 0 0 0 1px #a96b24; }
 .gantt-bar.normal-float { background: #607a9d; }
 .gantt-today span { position: absolute; top: 3px; left: 6px; padding: 2px 5px; border-radius: 4px; background: var(--red); color: #fff; font-size: 8px; font-weight: 900; white-space: nowrap; }

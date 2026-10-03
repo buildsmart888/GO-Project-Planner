@@ -370,7 +370,9 @@
               <label class="field"><span>Approved budget</span><input id="settings-budget" type="number" min="0" step="1000" required /></label>
               <label class="field"><span>Data date</span><input id="settings-data-date" type="date" required /></label>
               <label class="field"><span>Manpower capacity (people/day)</span><input id="settings-resource-capacity" type="number" min="1" step="1" required /></label>
-              <label class="field"><span>Calendar</span><select id="settings-calendar"><option value="calendar">Calendar days</option></select></label>
+              <label class="field"><span>Calendar / วันทำงาน</span><select id="settings-calendar"><option value="calendar">7 days / ทุกวัน</option><option value="work6">6 days / จันทร์–เสาร์</option><option value="work5">5 days / จันทร์–ศุกร์</option></select></label>
+              <label class="field span-2"><span>Holidays / วันหยุด YYYY-MM-DD</span><textarea id="settings-holidays" rows="2" placeholder="2026-12-31, 2027-01-01"></textarea></label>
+              <label class="field span-2"><span><input id="settings-forecast" type="checkbox"> Forecast from Actual + Remaining Duration / คาดการณ์จากผลงานจริง</span></label>
               <label class="field span-2"><span>Project note</span><textarea id="settings-note" rows="4" placeholder="Scope, reporting assumptions or key constraints"></textarea></label>
               <div class="form-actions span-2"><button class="primary-btn" type="submit">Save project settings</button></div>
             </form>
@@ -427,7 +429,9 @@
           <label class="field"><span>WBS / Work package</span><input id="task-wbs" type="text" placeholder="WBS 1 · Structure" /></label>
           <label class="field"><span>Resource team</span><input id="task-resource-team" type="text" placeholder="Civil crew" /></label>
           <label class="field"><span>People per day</span><input id="task-manpower" type="number" min="0" max="9999" step="1" value="0" /></label>
-          <label class="field"><span>Duration (calendar days)</span><input id="task-duration" type="number" min="1" max="999" value="5" required /></label>
+          <label class="field"><span>Duration / วันตามปฏิทินโครงการ</span><input id="task-duration" type="number" min="0" max="999" value="5" required /></label>
+          <label class="field"><span><input id="task-milestone" type="checkbox"> Milestone / จุดส่งมอบ (0 วัน)</span></label>
+          <label class="field"><span>Remaining Duration / วันทำงานที่เหลือ</span><input id="task-remaining" type="number" min="0" max="999" placeholder="Auto from progress" /></label>
           <label class="field"><span>Actual Start / เริ่มจริง</span><input id="task-actual-start" type="date" /></label>
           <label class="field"><span>Actual Finish / จบจริง</span><input id="task-actual-finish" type="date" /></label>
           <label class="field"><span>Planned start</span><input id="task-planned-start" type="date" /></label>

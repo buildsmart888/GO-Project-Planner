@@ -373,7 +373,9 @@
         sourceDuration: clampNumber(task.sourceDuration, 0, 999999, 0),
         resourceTeam: String(task.resourceTeam || task.owner || "General crew"),
         manpower: clampNumber(task.manpower, 0, 9999, defaultManpower(task.owner)),
-        duration: clampNumber(task.duration, 1, 999, 1),
+        duration: clampNumber(task.duration, 0, 999, 1),
+        milestone: Boolean(task.milestone) || Number(task.duration) === 0,
+        remainingDuration: task.remainingDuration === "" || task.remainingDuration == null ? null : clampNumber(task.remainingDuration, 0, 999, 0),
         predecessor: String(task.predecessor || ""),
         plannedStart: isISODate(task.plannedStart) ? task.plannedStart : "",
         plannedFinish: isISODate(task.plannedFinish) ? task.plannedFinish : "",
@@ -397,7 +399,9 @@
         startDate: isISODate(project.startDate) ? project.startDate : demo.project.startDate,
         budget: clampNumber(project.budget, 0, Number.MAX_SAFE_INTEGER, demo.project.budget),
         currency: ["THB", "USD", "EUR", "GBP", "SGD"].includes(project.currency) ? project.currency : "THB",
-        calendar: "calendar",
+        calendar: ["calendar","work5","work6"].includes(project.calendar) ? project.calendar : "calendar",
+        holidays: Array.isArray(project.holidays) ? project.holidays.filter(isISODate) : [],
+        forecast: Boolean(project.forecast),
         dataDate: isISODate(project.dataDate) ? project.dataDate : toISO(startOfDay(new Date())),
         resourceCapacity: clampNumber(project.resourceCapacity, 1, 999999, 70),
         note: String(project.note || "")
@@ -478,6 +482,7 @@
   }
 
   function buildSchedule() {
+    if (state.project.calendar !== "calendar" || state.project.holidays?.length || state.project.forecast || state.tasks.some(t=>t.milestone || t.duration===0)) return buildWorkingSchedule();
     const tasks = state.tasks;
     const projectStart = fromISO(state.project.startDate);
     const byId = new Map(tasks.map((task, index) => [task.id.toUpperCase(), { task, index }]));
@@ -608,6 +613,55 @@
     };
   }
 
+  function buildWorkingSchedule() {
+    const projectStart=fromISO(state.project.startDate), tasks=state.tasks, issues=[];
+    const holidays=new Set(state.project.holidays||[]);
+    const working=date=>!holidays.has(toISO(date)) && (state.project.calendar==="work5" ? date.getDay()>0 && date.getDay()<6 : state.project.calendar==="work6" ? date.getDay()!==0 : true);
+    let origin=projectStart; while(!working(origin))origin=addDays(origin,1);
+    const dates=[origin];
+    const dateAt=index=>{ index=Math.round(index);if(index<0){let d=origin;for(let n=0;n>index;){d=addDays(d,-1);if(working(d))n--;}return d;}
+      while(dates.length<=index){let d=addDays(dates.at(-1),1);while(!working(d))d=addDays(d,1);dates.push(d);}return dates[index];};
+    const indexAt=date=>{let index=0;if(date<origin){while(dateAt(index)>date)index--;return index;}while(dateAt(index)<date)index++;return index;};
+    const ids=new Map(tasks.map(t=>[t.id.toUpperCase(),t])), preds=new Map(), successorMap=new Map(tasks.map(t=>[t.id.toUpperCase(),[]])), degree=new Map();
+    tasks.forEach(task=>{const id=task.id.toUpperCase(), links=[];parsePredecessors(task.predecessor).forEach(p=>{
+      if(p.invalid||p.id===id||!ids.has(p.id)){issues.push({type:"error",taskId:id,message:p.invalid?`Invalid dependency ${p.raw}`:p.id===id?"Self dependency":`Missing predecessor ${p.id}`});return;}
+      links.push(p);successorMap.get(p.id).push({id,type:p.type,lag:p.lag});});preds.set(id,links);degree.set(id,links.length);});
+    const queue=tasks.filter(t=>!degree.get(t.id.toUpperCase())).map(t=>t.id.toUpperCase()),topo=[];
+    while(queue.length){const id=queue.shift();topo.push(id);successorMap.get(id).forEach(s=>{degree.set(s.id,degree.get(s.id)-1);if(!degree.get(s.id))queue.push(s.id);});}
+    const cycles=[...ids.keys()].filter(id=>!topo.includes(id));if(cycles.length)issues.push({type:"error",taskId:cycles.join(", "),message:`Circular predecessor logic detected: ${cycles.join(", ")}`});
+    const timing=new Map(), dataIndex=indexAt(fromISO(state.project.dataDate));
+    const normalDuration=task=>task.milestone?0:task.plannedStart&&task.plannedFinish?Math.max(1,indexAt(fromISO(task.plannedFinish))-indexAt(fromISO(task.plannedStart))+1):Math.max(1,task.duration);
+    const span=d=>Math.max(0,d-1);
+    const edge=(p,prev,d)=>p.type==="FS"?prev.finish+(prev.workDuration===0?0:1)+p.lag:p.type==="SS"?prev.start+p.lag:p.type==="FF"?prev.finish+p.lag-span(d):prev.start+p.lag-span(d);
+    [...topo,...cycles].forEach(id=>{
+      const task=ids.get(id);let d=normalDuration(task), start=0,finish, fixed=false;
+      if(task.plannedStart)start=indexAt(fromISO(task.plannedStart));else if(task.plannedFinish)start=indexAt(fromISO(task.plannedFinish))-span(d);
+      if(state.project.forecast && task.actualStart){
+        start=indexAt(fromISO(task.actualStart));fixed=true;
+        if(task.actualFinish){finish=indexAt(fromISO(task.actualFinish));d=Math.max(0,finish-start+1);if(task.milestone)d=0;}
+        else{const remaining=task.remainingDuration??Math.ceil(d*(1-task.progress/100));finish=Math.max(start,dataIndex)+span(remaining);d=Math.max(1,finish-start+1);}
+      } else {
+        if(state.project.forecast){start=Math.max(start,dataIndex);if(task.remainingDuration!=null && !task.milestone)d=Math.max(1,task.remainingDuration);}
+        preds.get(id).forEach(p=>{const prev=timing.get(p.id);if(prev)start=Math.max(start,edge(p,prev,d));});start=Math.max(0,start);finish=start+span(d);
+      }
+      if(fixed)preds.get(id).forEach(p=>{const prev=timing.get(p.id);if(prev && start<edge(p,prev,d))issues.push({type:"warning",taskId:id,message:"Actual dates conflict with predecessor logic; actual dates retained."});});
+      timing.set(id,{start,finish,workDuration:d,fixed,cycle:cycles.includes(id)});
+    });
+    const finishIndex=Math.max(0,...[...timing.values()].map(t=>t.finish));
+    [...topo].reverse().forEach(id=>{const t=timing.get(id);let latest=finishIndex-span(t.workDuration);
+      successorMap.get(id).forEach(s=>{const n=timing.get(s.id);if(n.cycle)return;const bound=s.type==="FS"?n.latestStart-(t.workDuration===0?0:1)-s.lag-span(t.workDuration):s.type==="SS"?n.latestStart-s.lag:s.type==="FF"?n.latestStart+span(n.workDuration)-s.lag-span(t.workDuration):n.latestStart+span(n.workDuration)-s.lag;
+        latest=Math.min(latest,bound);});
+      t.latestStart=latest;t.slack=latest-t.start;t.critical=!t.fixed && t.slack<=0;
+    });
+    const rows=tasks.map(task=>{const t=timing.get(task.id.toUpperCase()), startDate=dateAt(t.start),endDate=dateAt(t.finish);
+      const actualStart=state.project.forecast&&task.actualStart?fromISO(task.actualStart):startDate;
+      const actualEnd=state.project.forecast&&task.actualFinish?fromISO(task.actualFinish):endDate;
+      const es=diffDays(projectStart,actualStart),ef=diffDays(projectStart,actualEnd);
+      return {task,es,ef,ls:t.latestStart==null?null:diffDays(projectStart,dateAt(t.latestStart)),lf:t.latestStart==null?null:diffDays(projectStart,dateAt(t.latestStart+span(t.workDuration))),duration:task.milestone?0:Math.max(1,ef-es+1),workDuration:t.workDuration,slack:t.cycle?null:t.slack,critical:t.critical||false,cycle:t.cycle,startDate:actualStart,endDate:actualEnd,predecessors:preds.get(task.id.toUpperCase())};});
+    const projectFinishIndex=Math.max(0,...rows.map(r=>r.ef));
+    return {rows,byId:new Map(rows.map(r=>[r.task.id.toUpperCase(),r])),issues,projectStart,projectFinishIndex,projectFinishDate:addDays(projectStart,projectFinishIndex),todayIndex:diffDays(projectStart,fromISO(state.project.dataDate)),topo,successorMap};
+  }
+
   function effectiveTaskDuration(task, projectStart) {
     if (task.plannedStart && task.plannedFinish) {
       return Math.max(1, diffDays(fromISO(task.plannedStart), fromISO(task.plannedFinish)) + 1);
@@ -663,7 +717,7 @@
     const metrics = calculatePerformance(schedule);
     const now = new Date();
     document.getElementById("dashboard-date-chip").textContent = formatLongDate(now);
-    document.getElementById("dashboard-subtitle").textContent = `${state.tasks.length} tasks · ${formatDate(schedule.projectStart, true)} to ${formatDate(schedule.projectFinishDate, true)} · calendar-day schedule`;
+    document.getElementById("dashboard-subtitle").textContent = `${state.tasks.length} tasks · ${formatDate(schedule.projectStart, true)} to ${formatDate(schedule.projectFinishDate, true)} · ${state.project.calendar} ${state.project.forecast ? "Forecast" : "Plan"}`;
 
     const plannedPct = metrics.totalPlanned ? metrics.plannedValue / metrics.totalPlanned * 100 : 0;
     const progressDelta = metrics.overallProgress - plannedPct;
@@ -865,11 +919,11 @@
         <div class="gantt-task-label gantt-register-row ${row.task.summary ? "summary" : ""}" data-edit-task="${escapeAttr(row.task.id)}">
           ${cell("id", escapeHtml(row.task.id))}${cell("wbs", escapeHtml(row.task.wbs || "—"))}
           ${columns.includes("name") ? `<span class="gantt-col name" style="--outline:${Math.max(0, Number(row.task.outlineLevel || 1) - 1)}">${taskName}</span>` : ""}
-          ${cell("start", formatDate(row.startDate), "date")}${cell("finish", formatDate(row.endDate), "date")}${cell("days", row.task.sourceDuration || row.duration)}${cell("tf", row.slack ?? "—")}${cell("plan", `${round1(plannedFraction(row, schedule.todayIndex) * 100)}%`)}${cell("actual", `${row.task.progress}%`)}${cell("status", row.task.progress >= 100 ? "DONE" : row.task.progress > 0 ? "IN PROGRESS" : "NOT START", "state")}
+          ${cell("start", formatDate(row.startDate), "date")}${cell("finish", formatDate(row.endDate), "date")}${cell("days", row.task.milestone ? "◆ 0" : row.workDuration ?? (row.task.sourceDuration || row.duration))}${cell("tf", row.slack ?? "—")}${cell("plan", `${round1(plannedFraction(row, schedule.todayIndex) * 100)}%`)}${cell("actual", `${row.task.progress}%`)}${cell("status", row.task.progress >= 100 ? "DONE" : row.task.progress > 0 ? "IN PROGRESS" : "NOT START", "state")}
         </div>
         <div class="gantt-timeline-row" style="--day-px:${zoom.px}px">
           ${baseline}
-          <div class="gantt-bar status-${row.task.status} ${row.critical ? "critical" : row.slack <= 5 ? "near-critical" : "normal-float"}" style="left:${left}px;width:${width}px" data-edit-task="${escapeAttr(row.task.id)}" title="${escapeAttr(`${row.task.id} · ${row.task.name}\n${formatDate(row.startDate, true)} — ${formatDate(row.endDate, true)}\nTF ${row.slack}d · ${row.task.progress}% complete`)}">
+          <div class="gantt-bar ${row.task.milestone ? "milestone-bar" : ""} status-${row.task.status} ${row.critical ? "critical" : row.slack <= 5 ? "near-critical" : "normal-float"}" style="left:${left}px;width:${width}px" data-edit-task="${escapeAttr(row.task.id)}" title="${escapeAttr(`${row.task.id} · ${row.task.name}\n${formatDate(row.startDate, true)} — ${formatDate(row.endDate, true)}\nTF ${row.slack}d · ${row.task.progress}% complete`)}">
             <span class="gantt-bar-progress" style="width:${row.task.progress}%"></span>
             <span class="gantt-bar-text">${width > 80 ? escapeHtml(row.task.name) : escapeHtml(row.task.id)}</span>
           </div>
@@ -919,7 +973,7 @@
         if (hasBaseline && row.task.baselineStart && row.task.baselineFinish) {
           const bs = diffDays(schedule.projectStart, fromISO(row.task.baselineStart));
           const bf = diffDays(schedule.projectStart, fromISO(row.task.baselineFinish));
-          const fraction = day < bs ? 0 : day >= bf ? 1 : clampNumber((day - bs + 1) / Math.max(1, bf - bs + 1), 0, 1, 0);
+          const fraction = day < bs ? 0 : day >= bf ? 1 : clampNumber(workdaysBetween(fromISO(row.task.baselineStart),addDays(schedule.projectStart,day))/Math.max(1,workdaysBetween(fromISO(row.task.baselineStart),fromISO(row.task.baselineFinish))), 0, 1, 0);
           plannedValue += weight * fraction;
         } else plannedValue += weight * plannedFraction(row, day);
         const earned = weight * Number(row.task.progress || 0) / 100;
@@ -989,7 +1043,7 @@
       <td><span class="id-pill">${escapeHtml(row.task.id)}</span>${row.critical ? '<span class="critical-pill">Critical</span>' : ""}</td>
       <td class="task-cell"><strong>${escapeHtml(row.task.name)}</strong><small>${escapeHtml(row.task.wbs || "General")} · ${escapeHtml(row.task.notes || "No task note")}</small></td>
       <td>${escapeHtml(row.task.owner || "Unassigned")}</td>
-      <td class="numeric">${row.task.sourceDuration || row.duration}d</td>
+      <td class="numeric">${row.task.milestone ? "◆ 0" : row.workDuration ?? (row.task.sourceDuration || row.duration)}d</td>
       <td class="numeric"><span class="float-pill ${row.critical ? "critical" : row.slack <= 5 ? "near" : "normal"}">${row.slack ?? "—"}</span></td>
       <td>${row.predecessors.length ? row.predecessors.map((pred) => `<code class="dependency-chip">${escapeHtml(dependencyLabel(pred))}</code>`).join(" ") : "—"}</td>
       <td>${formatDate(row.startDate)}</td>
@@ -1183,9 +1237,14 @@
     };
   }
 
+  function isProjectWorkday(date) {
+    return !(state.project.holidays||[]).includes(toISO(date)) && (state.project.calendar==="work5"?date.getDay()>0&&date.getDay()<6:state.project.calendar==="work6"?date.getDay()!==0:true);
+  }
+  function workdaysBetween(start,end) { let days=0; for(let date=start;date<=end;date=addDays(date,1))if(isProjectWorkday(date))days++;return days; }
   function plannedFraction(row, dayIndex) {
     if (dayIndex < row.es) return 0;
     if (dayIndex >= row.ef) return 1;
+    if(row.workDuration!=null)return clampNumber(workdaysBetween(row.startDate,addDays(row.startDate,dayIndex-row.es))/Math.max(1,workdaysBetween(row.startDate,row.endDate)),0,1,0);
     return clampNumber((dayIndex - row.es + 1) / row.duration, 0, 1, 0);
   }
 
@@ -1341,7 +1400,7 @@
     const days = Array.from({ length: Math.max(1, schedule.projectFinishIndex + 1) }, (_, day) => {
       const byTeam = Object.fromEntries(teams.map((team) => [team, 0]));
       schedule.rows.forEach((row) => {
-        if (day >= row.es && day <= row.ef) byTeam[row.task.resourceTeam || row.task.owner || "General crew"] += manpowerFor(row.task);
+        if (!row.task.milestone && day >= row.es && day <= row.ef && isProjectWorkday(addDays(schedule.projectStart,day))) byTeam[row.task.resourceTeam || row.task.owner || "General crew"] += manpowerFor(row.task);
       });
       return { day, byTeam, total: Object.values(byTeam).reduce((a, b) => a + b, 0) };
     });
@@ -1353,7 +1412,7 @@
     const capacity = Number(state.project.resourceCapacity || 70);
     const peak = Math.max(0, ...series.days.map((day) => day.total));
     const overloadDays = series.days.filter((day) => day.total > capacity).length;
-    const personDays = schedule.rows.reduce((sum, row) => sum + manpowerFor(row.task) * row.duration, 0);
+    const personDays = series.days.reduce((sum,day)=>sum+day.total,0);
     document.getElementById("resource-kpis").innerHTML = [
       kpiCard({ label: "Peak manpower", value: `${peak} people`, icon: "↑", iconClass: peak > capacity ? "red" : "green", metaLeft: `Capacity ${capacity}/day`, metaClass: peak > capacity ? "bad" : "good", metaRight: `${overloadDays} overload days` }),
       kpiCard({ label: "Total person-days", value: personDays.toLocaleString(), icon: "Σ", iconClass: "blue", metaLeft: `${series.teams.length} resource teams`, metaRight: `${schedule.rows.length} activities` }),
@@ -1389,7 +1448,9 @@
     document.getElementById("settings-budget").value = state.project.budget;
     document.getElementById("settings-data-date").value = state.project.dataDate;
     document.getElementById("settings-resource-capacity").value = state.project.resourceCapacity;
-    document.getElementById("settings-calendar").value = "calendar";
+    document.getElementById("settings-calendar").value = state.project.calendar;
+    document.getElementById("settings-holidays").value = (state.project.holidays || []).join(", ");
+    document.getElementById("settings-forecast").checked = Boolean(state.project.forecast);
     document.getElementById("settings-note").value = state.project.note || "";
   }
 
@@ -1404,6 +1465,8 @@
     document.getElementById("task-resource-team").value = task?.resourceTeam || task?.owner || "";
     document.getElementById("task-manpower").value = task ? manpowerFor(task) : 0;
     document.getElementById("task-duration").value = task?.duration ?? 5;
+    document.getElementById("task-milestone").checked = Boolean(task?.milestone);
+    document.getElementById("task-remaining").value = task?.remainingDuration ?? "";
     document.getElementById("task-planned-start").value = task?.plannedStart || "";
     document.getElementById("task-planned-finish").value = task?.plannedFinish || "";
     document.getElementById("task-actual-start").value = task?.actualStart || "";
@@ -1478,7 +1541,9 @@
       wbs: document.getElementById("task-wbs").value.trim() || "General",
       resourceTeam: document.getElementById("task-resource-team").value.trim() || document.getElementById("task-owner").value.trim() || "General crew",
       manpower: clampNumber(document.getElementById("task-manpower").value, 0, 9999, 0),
-      duration: clampNumber(document.getElementById("task-duration").value, 1, 999, 1),
+      duration: document.getElementById("task-milestone").checked ? 0 : clampNumber(document.getElementById("task-duration").value, 0, 999, 1),
+      milestone: document.getElementById("task-milestone").checked || Number(document.getElementById("task-duration").value)===0,
+      remainingDuration: document.getElementById("task-remaining").value === "" ? null : clampNumber(document.getElementById("task-remaining").value,0,999,0),
       plannedStart,
       plannedFinish,
       actualStart,
@@ -1589,7 +1654,11 @@
     state.project.budget = clampNumber(document.getElementById("settings-budget").value, 0, Number.MAX_SAFE_INTEGER, 0);
     state.project.dataDate = document.getElementById("settings-data-date").value;
     state.project.resourceCapacity = clampNumber(document.getElementById("settings-resource-capacity").value, 1, 999999, 70);
-    state.project.calendar = "calendar";
+    const holidays = document.getElementById("settings-holidays").value.split(/[\s,;]+/).filter(Boolean);
+    if (holidays.some(d=>!isISODate(d))) { showToast("วันหยุดใช้รูปแบบ YYYY-MM-DD คั่นด้วยจุลภาค","error"); return; }
+    state.project.calendar = document.getElementById("settings-calendar").value;
+    state.project.holidays = [...new Set(holidays)];
+    state.project.forecast = document.getElementById("settings-forecast").checked;
     state.project.note = document.getElementById("settings-note").value.trim();
     saveState();
     renderAll();
@@ -1674,6 +1743,9 @@
             resourceTeam: assigned.map((item) => item.name).join(" + ") || "Unassigned",
             manpower: Math.max(0, Math.ceil(assigned.reduce((sum, item) => sum + item.units, 0))),
             duration,
+            milestone: textOf(node,"Milestone","0")==="1",
+            actualStart: textOf(node,"ActualStart").slice(0,10),
+            actualFinish: textOf(node,"ActualFinish").slice(0,10),
             sourceDuration: duration,
             plannedStart: start,
             plannedFinish: finish,
@@ -1958,6 +2030,21 @@
     return escapeHtml(value).replace(/\n/g, "&#10;");
   }
 
+  function initLanguage() {
+    const words={"Dashboard":"ภาพรวม","Gantt & tasks":"แผนงานและกิจกรรม","Critical Path":"เส้นทางวิกฤต","Kanban":"กระดานงาน","Cost & S-curve":"ต้นทุนและ S-Curve","Resource histogram":"กำลังคน","3-week look ahead":"แผนล่วงหน้า 3 สัปดาห์","Project settings":"ตั้งค่าโครงการ","Today":"วันนี้","Export":"ส่งออก","Print":"พิมพ์","Paper":"กระดาษ","Add task":"เพิ่มกิจกรรม","＋ Add task":"＋ เพิ่มกิจกรรม","Active project":"โครงการปัจจุบัน","Gantt chart & task register":"แผนงาน Gantt และทะเบียนกิจกรรม","Month":"เดือน","Week":"สัปดาห์","Day":"วัน","Hide table":"ซ่อนตาราง","Show table":"แสดงตาราง","Width":"ความกว้าง","Columns":"คอลัมน์","All":"ทั้งหมด","Critical":"วิกฤต","Critical only":"เฉพาะวิกฤต","Set baseline":"บันทึกแผนฐาน","Baseline":"แผนฐาน","Planned":"แผน","Progress":"ความก้าวหน้า","Timeline":"ระยะเวลาโครงการ","Task register":"ทะเบียนกิจกรรม","Dependencies, dates and cost":"ความสัมพันธ์ วันที่ และต้นทุน","General information":"ข้อมูลทั่วไป","Project name":"ชื่อโครงการ","Project start":"วันเริ่มโครงการ","Approved budget":"งบประมาณอนุมัติ","Data date":"วันที่รายงาน","Project note":"หมายเหตุโครงการ","Save project settings":"บันทึกการตั้งค่า","Backup & restore":"สำรองและกู้คืน","Data management":"จัดการข้อมูล","Export project backup":"สำรองโครงการ","Import project backup":"กู้คืนโครงการ","Import Microsoft Project XML":"นำเข้า XML จาก Microsoft Project","Export task register":"ส่งออกทะเบียนกิจกรรม","Add task":"เพิ่มกิจกรรม","Edit task":"แก้ไขกิจกรรม","Cancel":"ยกเลิก","Save task":"บันทึกกิจกรรม","Delete task":"ลบกิจกรรม","Task name":"ชื่อกิจกรรม","Owner":"ผู้รับผิดชอบ","Start":"เริ่ม","Finish":"จบ","Days":"วัน","Status":"สถานะ","Cost":"ต้นทุน","Duration":"ระยะเวลา","Predecessor":"กิจกรรมก่อนหน้า","Notes":"หมายเหตุ","Summary":"สรุป","Weekly detail":"รายละเอียดรายสัปดาห์","Monthly from weeks":"รายเดือนจากสัปดาห์","Plan / period":"แผนรายงวด","Sum Plan":"แผนสะสม","Actual / period":"ผลงานรายงวด","Sum Actual":"ผลงานสะสม","Plan value / period":"มูลค่าแผนรายงวด","Sum Plan value":"มูลค่าแผนสะสม","Actual value / period":"มูลค่าผลงานรายงวด","Sum Actual value":"มูลค่าผลงานสะสม","Progress control":"ควบคุมความก้าวหน้า","Weekly progress & monthly accumulation":"ความก้าวหน้ารายสัปดาห์และสะสมรายเดือน","Overlay S-curve on Gantt":"ซ้อน S-Curve บน Gantt","Fit diagram":"จัดกราฟพอดีจอ","Show all":"แสดงทั้งหมด","โครงการ":"Projects","เริ่มต้น":"Quick Start","ตรวจข้อมูล":"Validation","ตั้งค่าพิมพ์":"Print options"};
+    let language=localStorage.getItem("go-planner.language")||"th"; const originals=new WeakMap();
+    const apply=()=>{observer.disconnect();document.documentElement.lang=language;const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);let node;
+      while(node=walker.nextNode()){if(node.parentElement?.closest("script,style,textarea,input,.gantt-bar-text,.task-cell,.gantt-col.name,.project-title-row h1"))continue;
+        const current=node.nodeValue.trim(), prior=originals.get(node);if(prior && current!==prior.translated && current!==prior.original)originals.delete(node);
+        const saved=originals.get(node),original=saved?.original||current;
+        const replacement=language==="th"?words[original]||original:({"โครงการ":"Projects","เริ่มต้น":"Quick Start","ตรวจข้อมูล":"Validation","ตั้งค่าพิมพ์":"Print options"}[original]||original);
+        if(replacement!==current){node.nodeValue=node.nodeValue.replace(current,replacement);originals.set(node,{original,translated:replacement});}
+      }
+      observer.observe(document.body,{childList:true,subtree:true,characterData:true});};
+    let pending=false;const observer=new MutationObserver(()=>{if(!pending){pending=true;queueMicrotask(()=>{pending=false;apply();});}});
+    const select=document.getElementById("pilot-language");select.value=language;select.addEventListener("change",()=>{language=select.value;localStorage.setItem("go-planner.language",language);apply();});apply();
+  }
+
   const PILOT_KEY = "go-project-planner.projects.v1";
   let pilotProjects = { active:"", items:[] };
   function persistPilotProject() {
@@ -2000,14 +2087,15 @@
     saveState(true);renderAll();showToast(direction==="undo"?"ย้อนกลับแล้ว":"ทำซ้ำแล้ว","success");
   }
   function quickStartPilot() {
-    pilotDialog("เริ่มต้นใช้งาน / Quick Start", `<div class="pilot-guide"><h3>1. สร้างหรือเปิดโครงการ</h3><p>ใช้ปุ่มโครงการ หรือไป Project settings เพื่อนำเข้า JSON / Microsoft Project XML</p><h3>2. วางแผนกิจกรรม</h3><p>เพิ่มงาน ระยะเวลา และ predecessor เช่น T100FS+2,T110SS แล้วตรวจผลใน Gantt และ Critical Path</p><h3>3. ตั้ง Baseline และ Data Date</h3><p>เก็บแผนอนุมัติก่อนเริ่มอัปเดต กรอกวันเริ่ม–จบจริงและ % Progress ในกิจกรรม</p><h3>4. ตรวจและสำรองข้อมูล</h3><p>เปิดศูนย์ตรวจข้อมูลก่อนรายงาน และสำรองทุกโครงการก่อนเปลี่ยนเครื่อง</p><p class="pilot-note">รุ่นนี้ใช้วันปฏิทิน 7 วัน และ Actual Dates เป็นข้อมูลติดตาม ยังไม่ปรับ Forecast อัตโนมัติ</p></div><button data-pilot="close">เริ่มใช้งาน</button>`);
+    pilotDialog("เริ่มต้นใช้งาน / Quick Start", `<div class="pilot-guide"><h3>1. สร้างหรือเปิดโครงการ</h3><p>ใช้ปุ่มโครงการ หรือ Settings เพื่อนำเข้า JSON / Microsoft Project XML</p><h3>2. ตั้งปฏิทินโครงการ</h3><p>เลือก 5/6/7 วันทำงานและกรอกวันหยุด YYYY-MM-DD ระยะเวลาและ Lag/Lead นับตามวันทำงาน</p><h3>3. วางแผนและเก็บ Baseline</h3><p>เพิ่มกิจกรรม เลือก Milestone สำหรับจุดส่งมอบ 0 วัน ตรวจ Dependency และบันทึกแผนฐาน</p><h3>4. อัปเดตและ Forecast</h3><p>ตั้ง Data Date กรอก Actual Start/Finish และ Remaining Duration แล้วเปิด Forecast ใน Settings วันที่จริงจะไม่ถูกแก้โดย dependency แต่จะแสดงคำเตือน</p><h3>5. ตรวจและสำรอง</h3><p>ใช้ศูนย์ตรวจข้อมูลก่อนรายงาน และสำรองก่อนเปลี่ยนเครื่อง</p><p class="pilot-note">ใช้ปฏิทินร่วมหนึ่งชุด ไม่รองรับปฏิทินราย Resource หรือ Resource Leveling ภาษาไทยครอบคลุมเมนูหลัก ข้อความรายละเอียดบางส่วนยังเป็นอังกฤษ</p></div><button data-pilot="close">เริ่มใช้งาน</button>`);
   }
   function initPilot() {
     try { const saved=JSON.parse(localStorage.getItem(PILOT_KEY));if(saved && Array.isArray(saved.items))pilotProjects=saved; } catch{}
     if(!pilotProjects.items.length){pilotProjects.active=crypto.randomUUID();pilotProjects.items=[{id:pilotProjects.active,data:JSON.parse(JSON.stringify(state))}];}
     historySnapshot=JSON.stringify({project:state.project,tasks:state.tasks});
-    const bar=document.createElement("div");bar.className="pilot-bar";bar.innerHTML=`<span class="pilot-version">Pilot 0.7 · ข้อมูลในเครื่อง</span><button data-pilot="projects">โครงการ</button><button data-pilot="guide">เริ่มต้น</button><button data-pilot="undo">Undo</button><button data-pilot="redo">Redo</button><button data-pilot="validate">ตรวจข้อมูล</button><button data-pilot="print">ตั้งค่าพิมพ์</button><button data-pilot="feedback">Feedback</button>`;
+    const bar=document.createElement("div");bar.className="pilot-bar";bar.innerHTML=`<span class="pilot-version">Pilot 0.8 · ข้อมูลในเครื่อง</span><button data-pilot="projects">โครงการ</button><button data-pilot="guide">เริ่มต้น</button><button data-pilot="undo">Undo</button><button data-pilot="redo">Redo</button><button data-pilot="validate">ตรวจข้อมูล</button><button data-pilot="print">ตั้งค่าพิมพ์</button><button data-pilot="feedback">Feedback</button><select id="pilot-language" aria-label="Language"><option value="th">ไทย</option><option value="en">English</option></select>`;
     document.querySelector(".topbar").after(bar);
+    initLanguage();
     const restore=document.createElement("input");restore.type="file";restore.accept=".json";restore.hidden=true;document.body.appendChild(restore);
     restore.addEventListener("change",async()=>{
       try { const data=JSON.parse(await restore.files[0].text());if(data.format!=="GO_PILOT_BACKUP"||!Array.isArray(data.items)||!data.items.length)throw Error();
@@ -2045,9 +2133,9 @@
 
   Object.defineProperty(window, "__GO_PLANNER_TEST__", { value: {
     parsePredecessors,
-    build(tasks, startDate = "2026-01-01") {
+    build(tasks, startDate = "2026-01-01", project = {}) {
       const previous = state;
-      state = normalizeState({ project: { startDate }, tasks, ui: {} });
+      state = normalizeState({ project: { startDate, ...project }, tasks, ui: {} });
       const schedule = buildSchedule();
       state = previous;
       return schedule;

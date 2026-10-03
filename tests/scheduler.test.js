@@ -52,3 +52,28 @@ assert.equal(row(s, "D").es, 4, "planned start is selectable");
 assert.equal(row(s, "D").duration, 4, "planned finish derives inclusive duration");
 
 console.log("Scheduler tests passed: FS, SS, FF, SF, lag/lead, multiple, legacy, dates and validation.");
+
+const iso=d=>d.toISOString().slice(0,10);
+s=api.build([task('A',2),task('B',1,'AFS')],'2026-01-02',{calendar:'work5'});
+assert.equal(iso(row(s,'A').endDate),'2026-01-05');
+assert.equal(iso(row(s,'B').startDate),'2026-01-06');
+s=api.build([task('A',2)],'2026-01-02',{calendar:'work5',holidays:['2026-01-05']});
+assert.equal(iso(row(s,'A').endDate),'2026-01-06');
+s=api.build([task('A',2)],'2026-01-03',{calendar:'work6'});
+assert.equal(iso(row(s,'A').endDate),'2026-01-05');
+for(const relation of ['FS','SS','FF','SF']){
+ s=api.build([task('A',5),task('B',3,`A${relation}+2`)],'2026-01-05',{calendar:'work5'});
+ const a=row(s,'A'),b=row(s,'B');
+ assert.ok(Number.isFinite(b.slack));
+ if(relation==='FS')assert.equal(iso(b.startDate),'2026-01-14');
+ if(relation==='SS')assert.equal(iso(b.startDate),'2026-01-07');
+ if(relation==='FF')assert.equal(iso(b.endDate),'2026-01-13');
+ if(relation==='SF')assert.equal(iso(b.endDate),'2026-01-07');
+}
+s=api.build([task('A',2),task('M',0,'AFS'),task('B',1,'MFS')],'2026-01-05',{calendar:'work5'});
+assert.equal(row(s,'M').duration,0);assert.equal(row(s,'M').es,row(s,'B').es);
+s=api.build([{...task('A',10),actualStart:'2026-01-05',remainingDuration:3,progress:40},task('B',2,'AFS')],'2026-01-05',{calendar:'work5',forecast:true,dataDate:'2026-01-09'});
+assert.equal(iso(row(s,'A').endDate),'2026-01-13');assert.equal(iso(row(s,'B').startDate),'2026-01-14');
+s=api.build([{...task('A',10),actualStart:'2026-01-05',actualFinish:'2026-01-08',progress:100}],'2026-01-05',{forecast:true,dataDate:'2026-01-12'});
+assert.equal(iso(row(s,'A').endDate),'2026-01-08');
+console.log('Working calendars, holidays, milestones and forecast tests passed.');
