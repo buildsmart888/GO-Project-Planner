@@ -36,4 +36,4 @@ Open an issue describing the expected behavior and reproduction steps. Submit ch
 
 ## License
 
-An open-source license has not yet been selected by the owner. Public visibility alone does not grant unrestricted reuse rights.
+Licensed under the [MIT License](LICENSE). You may use, modify, redistribute and use commercially, provided the copyright and permission notice are retained. The software is provided as-is without warranty.
