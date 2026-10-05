@@ -2337,7 +2337,6 @@ code {
   .gantt-shell, .table-scroll { overflow: visible; }
   body[data-print-view="schedule"] .schedule-heading-row, body[data-print-view="schedule"] #schedule-alerts, body[data-print-view="schedule"] .schedule-panel-header { display:none !important; }
   body[data-print-view="schedule"] .schedule-panel { padding:0; border:0; }
-  body[data-print-view="schedule"] .gantt-inner { zoom:.56; }
   body[data-print-view="schedule"] .gantt-header, body[data-print-view="schedule"] .gantt-corner, body[data-print-view="schedule"] .gantt-task-label { position:static; }
   body[data-print-view="schedule"] .gantt-scurve-panel { margin-top:4mm; padding:3mm; break-inside:avoid; }
   body[data-print-view="schedule"] .gantt-scurve-panel .panel-header, body[data-print-view="schedule"] .gantt-scurve-host { display:none !important; }
