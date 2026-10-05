@@ -69,3 +69,12 @@ Licensed under the [MIT License](LICENSE). You may use, modify, redistribute and
 - Resource Histogram supports date/team filters and daily concurrent overload details. Workdays, zero manpower and milestones are respected; Summary tasks are excluded from progress/cost/resource totals to avoid double counting. No automatic resource leveling.
 - Validation: scheduler, dated actuals, weekly/monthly reconciliation, summary exclusion and XML mapping tests pass in UTC and Asia/Bangkok. The supplied Master Plan XML was checked (261 tasks, 57 summaries). Browser visual/print-preview QA could not run on this static project in the current managed preview environment; verify real browser Print Preview before contractual issue.
 
+
+
+## Pilot 0.9.1 — print reliability
+
+- Schedule print rendering is independent from the current on-screen Gantt zoom. A4/A3 choose a dedicated print timeline density.
+- Fit Page is guarded by a minimum readability scale. If fitting Gantt + progress summary onto one page would shrink below the threshold, printing automatically switches to Fit Width.
+- Fit Page uses a scaled print-stage wrapper; Fit Width keeps vertical pagination for long task lists.
+- Gantt rows are protected from page breaks where supported by the browser. Visible rows still respect search, WBS collapse and critical-only filters.
+- Browser Print Preview remains the final visual gate for Background graphics, margins and PDF output.

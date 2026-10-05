@@ -15,6 +15,25 @@ vm.runInContext(fs.readFileSync("app.js", "utf8"), sandbox);
 const api = sandbox.window.__GO_PLANNER_TEST__;
 assert.equal(api.isISODate("2026-02-30"),false,"Reject rolled-over calendar dates");
 assert.equal(api.isISODate("2028-02-29"),true,"Accept leap-day dates");
+
+const a4=api.printPageMetrics("A4"),a3=api.printPageMetrics("A3");
+assert.ok(a3.widthPx>a4.widthPx&&a3.heightPx>a4.heightPx,"A3 printable area exceeds A4");
+let layout=api.computePrintLayout({size:"A4",requestedMode:"page",contentWidthPx:1000,contentHeightPx:600,minScale:.58});
+assert.equal(layout.mode,"page","Readable one-page reports stay in Fit Page");
+assert.equal(layout.fallback,false);
+layout=api.computePrintLayout({size:"A4",requestedMode:"page",contentWidthPx:2500,contentHeightPx:9000,minScale:.58});
+assert.equal(layout.mode,"width","Unreadable Fit Page falls back to Fit Width");
+assert.equal(layout.fallback,true);
+layout=api.computePrintLayout({size:"A3",requestedMode:"width",contentWidthPx:5000,contentHeightPx:15000,minScale:.58});
+assert.equal(layout.mode,"width","Explicit Fit Width is preserved");
+assert.ok(layout.scale>0&&layout.scale<=1);
+
+const printZoomShort=api.resolvePrintZoom(90,"A4",520);
+const printZoomLong=api.resolvePrintZoom(365,"A4",520);
+assert.ok(printZoomShort.px>printZoomLong.px,"Long timelines use denser print resolution");
+assert.ok(printZoomLong.px>=2.5&&printZoomLong.px<=14,"Print timeline density remains bounded");
+console.log("Print layout policy tests passed: A4/A3 sizing, readability fallback and timeline density.");
+
 const task = (id, duration, predecessor = "") => ({ id, name: id, duration, predecessor });
 const row = (schedule, id) => schedule.byId.get(id);
 
