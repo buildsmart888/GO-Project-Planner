@@ -14,6 +14,9 @@
     week: { px: 18, tick: 7 },
     day: { px: 38, tick: 1 }
   };
+  const PRINT_MIN_SCALE = 0.58;
+  const PRINT_PERIOD_MIN_PX = 34;
+  const PRINT_COLUMN_WIDTHS = { id:48, wbs:62, name:220, start:72, finish:72, days:42, tf:38, plan:52, actual:52, status:82 };
 
   let state = loadState();
   let currentSchedule = null;
@@ -827,9 +830,7 @@
     document.getElementById("gantt-scurve-toggle").checked = Boolean(state.ui.showGanttSCurve);
     document.getElementById("gantt-scurve-period").value = state.ui.curvePeriod || "month";
 
-    const query = state.ui.search.trim().toLowerCase();
-    let rows = applyCollapsedWbs(schedule.rows).filter((row) => !query || [row.task.id, row.task.name, row.task.owner, row.task.predecessor, row.task.status].some((value) => String(value || "").toLowerCase().includes(query)));
-    if (state.ui.ganttCriticalMode === "only") rows = rows.filter((row) => row.critical || summaryContainsCritical(row, schedule.rows));
+    const rows = visibleScheduleRows(schedule);
     const widthInput = document.getElementById("gantt-table-width"); if (widthInput) widthInput.value = state.ui.ganttTableWidth;
     document.getElementById("gantt-table-toggle").textContent = state.ui.ganttTableVisible ? "Hide table" : "Show table";
     document.querySelectorAll("[data-gantt-column]").forEach((input) => input.checked = state.ui.ganttColumns.includes(input.dataset.ganttColumn));
@@ -840,6 +841,13 @@
     renderTaskTable(rows);
     renderGanttSCurve(schedule);
     document.getElementById("task-table-summary").textContent = `${rows.length} of ${state.tasks.length} tasks · ${schedule.rows.filter((row) => row.critical).length} critical`;
+  }
+
+  function visibleScheduleRows(schedule) {
+    const query = state.ui.search.trim().toLowerCase();
+    let rows = applyCollapsedWbs(schedule.rows).filter((row) => !query || [row.task.id, row.task.name, row.task.owner, row.task.predecessor, row.task.status].some((value) => String(value || "").toLowerCase().includes(query)));
+    if (state.ui.ganttCriticalMode === "only") rows = rows.filter((row) => row.critical || summaryContainsCritical(row, schedule.rows));
+    return rows;
   }
 
   function applyCollapsedWbs(rows) {
@@ -869,12 +877,16 @@
     host.innerHTML = alerts.slice(0, 6).map((alert) => `<div class="alert ${alert.type}"><span class="alert-icon">${alert.type === "error" ? "!" : alert.type === "warning" ? "△" : "i"}</span><div><strong>${alert.type === "error" ? "Scheduling error" : alert.type === "warning" ? "Schedule warning" : "Information"}</strong>${escapeHtml(alert.message)}</div></div>`).join("");
   }
 
-  function renderGantt(rows, schedule) {
+  function renderGantt(rows, schedule, target = null, options = {}) {
     const columnMeta = { id:["ID","48px"], wbs:["WBS","62px"], name:["Task name","minmax(150px,1fr)"], start:["Start","72px"], finish:["Finish","72px"], days:["Days","42px"], tf:["TF","38px"], plan:["% Plan","52px"], actual:["% Act.","52px"], status:["Status","82px"] };
-    const columns = (state.ui.ganttColumns || []).filter((key) => columnMeta[key]);
+    const columns = (options.columns || state.ui.ganttColumns || []).filter((key) => columnMeta[key]);
     const grid = columns.map((key) => columnMeta[key][1]).join(" ");
     const cell = (key, value, cls = key) => columns.includes(key) ? `<span class="gantt-col ${cls}">${value}</span>` : "";
-    const zoom = ZOOM[state.ui.zoom] || ZOOM.week;
+    const zoomKey = options.zoomKey || state.ui.zoom;
+    const zoom = options.zoom || ZOOM[zoomKey] || ZOOM.week;
+    const tableVisible = options.tableVisible ?? state.ui.ganttTableVisible;
+    const tableWidth = options.tableWidth ?? state.ui.ganttTableWidth;
+    const criticalMode = options.criticalMode || state.ui.ganttCriticalMode;
     const baselineFinishIndex = Math.max(0, ...state.tasks.filter((task) => task.baselineFinish).map((task) => diffDays(schedule.projectStart, fromISO(task.baselineFinish))));
     const totalDays = Math.max(35, schedule.projectFinishIndex + 8, baselineFinishIndex + 8);
     const timelineWidth = totalDays * zoom.px;
@@ -884,7 +896,7 @@
     const ticks = [];
     for (let day = 0; day < totalDays; day += zoom.tick) {
       const date = addDays(schedule.projectStart, day);
-      const label = state.ui.zoom === "day" ? formatDayShort(date) : state.ui.zoom === "week" ? formatDate(date) : formatMonthDay(date);
+      const label = zoomKey === "day" ? formatDayShort(date) : zoomKey === "week" || (zoomKey === "print" && zoom.tick <= 7) ? formatDate(date) : formatMonthDay(date);
       ticks.push(`<span class="gantt-tick-label" style="left:${day * zoom.px}px;width:${zoom.tick * zoom.px}px">${escapeHtml(label)}</span>`);
     }
 
@@ -938,7 +950,8 @@
       </div>`;
     }).join("") : `<div class="empty-state" style="margin:14px">No tasks match the current search.</div>`;
 
-    document.getElementById("gantt-chart").innerHTML = `<div class="gantt-inner ${state.ui.ganttTableVisible ? "" : "table-hidden"} ${state.ui.ganttCriticalMode === "highlight" ? "critical-focus" : ""}" style="--timeline-width:${timelineWidth}px;--label-width:${state.ui.ganttTableVisible ? state.ui.ganttTableWidth : 0}px;--register-grid:${grid}">
+    const host = target || document.getElementById("gantt-chart");
+    host.innerHTML = `<div class="gantt-inner ${tableVisible ? "" : "table-hidden"} ${criticalMode === "highlight" ? "critical-focus" : ""}" style="--timeline-width:${timelineWidth}px;--label-width:${tableVisible ? tableWidth : 0}px;--register-grid:${grid}">
       <div class="gantt-header">
         <div class="gantt-corner gantt-register-header">${columns.map((key) => `<span>${columnMeta[key][0]}</span>`).join("")}</div>
         <div class="gantt-header-timeline">${months}${ticks.join("")}</div>
@@ -1150,6 +1163,44 @@ table.innerHTML = `<caption>Data Date ${escapeHtml(state.project.dataDate)} · A
     applyNetworkTransform();
   }
 
+  function printPageMetrics(size) {
+    const widthMm = (size === "A3" ? 420 : 297) - 20;
+    const heightMm = (size === "A3" ? 297 : 210) - 20;
+    const pxPerMm = 96 / 25.4;
+    return { widthMm, heightMm, widthPx: widthMm * pxPerMm, heightPx: heightMm * pxPerMm };
+  }
+
+  function printableGanttTableWidth() {
+    if (!state.ui.ganttTableVisible) return 0;
+    const columns = (state.ui.ganttColumns || []).filter((key) => PRINT_COLUMN_WIDTHS[key]);
+    const raw = columns.reduce((sum, key) => sum + PRINT_COLUMN_WIDTHS[key], 0);
+    return clampNumber(raw || 520, 320, 760, 520);
+  }
+
+  function printGanttDaySpan(schedule) {
+    const baselineFinishIndex = Math.max(0, ...state.tasks.filter((task) => task.baselineFinish).map((task) => diffDays(schedule.projectStart, fromISO(task.baselineFinish))));
+    return Math.max(35, schedule.projectFinishIndex + 8, baselineFinishIndex + 8);
+  }
+
+  function resolvePrintZoom(totalDays, size, tableWidth) {
+    const page = printPageMetrics(size);
+    const targetScale = 0.68;
+    const timelineBudget = Math.max(260, page.widthPx / targetScale - tableWidth);
+    const px = clampNumber(timelineBudget / Math.max(1, totalDays), 2.5, 14, 7);
+    const tick = px >= 10 ? 7 : px >= 5 ? 14 : 30;
+    return { px, tick };
+  }
+
+  function computePrintLayout({ size, requestedMode = "page", contentWidthPx, contentHeightPx, minScale = PRINT_MIN_SCALE }) {
+    const page = printPageMetrics(size);
+    const widthScale = Math.min(1, page.widthPx / Math.max(1, contentWidthPx));
+    const pageScale = Math.min(widthScale, page.heightPx / Math.max(1, contentHeightPx));
+    const fallback = requestedMode === "page" && pageScale < minScale;
+    const mode = fallback ? "width" : requestedMode;
+    const scale = mode === "page" ? pageScale : widthScale;
+    return { ...page, requestedMode, mode, scale, widthScale, pageScale, fallback, belowReadableScale: scale < minScale };
+  }
+
   function printView(view) {
     const size = document.getElementById("print-paper-size")?.value === "A3" ? "A3" : "A4";
     let style = document.getElementById("dynamic-print-page");
@@ -1157,33 +1208,86 @@ table.innerHTML = `<caption>Data Date ${escapeHtml(state.project.dataDate)} · A
     style.textContent = `@page { size: ${size} landscape; margin: 10mm; }`;
     document.body.dataset.printView = view;
     document.getElementById("schedule-print-sheet")?.remove();
-    if(view==="schedule") {
-      const chart=document.querySelector("#gantt-chart .gantt-inner");
-      if(chart){
-        const sheet=document.createElement("section");sheet.id="schedule-print-sheet";
-        const clone=chart.cloneNode(true),matrix=document.querySelector(".gantt-scurve-panel")?.cloneNode(true);
-        const paperWidth=(size==="A3"?420:297)-20,paperHeight=(size==="A3"?297:210)-20;
-        const width=Math.max(chart.scrollWidth,chart.getBoundingClientRect().width);
-        sheet.style.width=`${width}px`;
-        sheet.innerHTML=`<header class="print-report-title"><h2>${escapeHtml(state.project.name)}</h2><p>Gantt & Progress · Data Date ${escapeHtml(state.project.dataDate)} · ${escapeHtml(state.project.calendar)} · ${state.ui.ganttCriticalMode} · ${size} Landscape</p></header>`;
-        const arrow=clone.querySelector("#ganttArrow");if(arrow){arrow.id="printGanttArrow";clone.querySelectorAll("[marker-end]").forEach(el=>el.setAttribute("marker-end","url(#printGanttArrow)"));}
-        clone.querySelectorAll("[id]").forEach(el=>{if(el.id!=="printGanttArrow")el.removeAttribute("id");});
-        matrix?.querySelectorAll("[id]").forEach(el=>el.removeAttribute("id"));
-        clone.style.width=`${width}px`;sheet.append(clone);
-        if(matrix&&!document.body.classList.contains("pilot-hide-summary")){matrix.querySelector(".gantt-scurve-host")?.remove();matrix.querySelector(".panel-header")?.remove();sheet.append(matrix);}
+
+    if (view === "schedule") {
+      const schedule = currentSchedule || buildSchedule();
+      const rows = visibleScheduleRows(schedule);
+      const tableWidth = printableGanttTableWidth();
+      const totalDays = printGanttDaySpan(schedule);
+      const zoom = resolvePrintZoom(totalDays, size, tableWidth);
+      const scratch = document.createElement("div");
+      renderGantt(rows, schedule, scratch, {
+        zoomKey: "print",
+        zoom,
+        tableWidth,
+        tableVisible: state.ui.ganttTableVisible,
+        columns: state.ui.ganttColumns,
+        criticalMode: state.ui.ganttCriticalMode
+      });
+      const clone = scratch.firstElementChild;
+      if (clone) {
+        const matrix = document.body.classList.contains("pilot-hide-summary") ? null : document.querySelector(".gantt-scurve-panel")?.cloneNode(true);
+        const ganttWidth = tableWidth + totalDays * zoom.px;
+        const periodCount = matrix?.querySelectorAll("thead tr:last-child th").length || 0;
+        const matrixMinWidth = matrix ? 210 + periodCount * PRINT_PERIOD_MIN_PX : 0;
+        const reportWidth = Math.max(ganttWidth, matrixMinWidth);
+
+        const sheet = document.createElement("section");
+        sheet.id = "schedule-print-sheet";
+        const stage = document.createElement("div");
+        stage.className = "print-scale-stage";
+        stage.style.width = `${reportWidth}px`;
+        stage.innerHTML = `<header class="print-report-title"><h2>${escapeHtml(state.project.name)}</h2><p>Gantt & Progress · Data Date ${escapeHtml(state.project.dataDate)} · ${escapeHtml(state.project.calendar)} · ${state.ui.ganttCriticalMode} · ${size} Landscape</p></header>`;
+
+        const arrow = clone.querySelector("#ganttArrow");
+        if (arrow) {
+          arrow.id = "printGanttArrow";
+          clone.querySelectorAll("[marker-end]").forEach((el) => el.setAttribute("marker-end", "url(#printGanttArrow)"));
+        }
+        clone.querySelectorAll("[id]").forEach((el) => { if (el.id !== "printGanttArrow") el.removeAttribute("id"); });
+        matrix?.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+        clone.style.width = `${ganttWidth}px`;
+        stage.append(clone);
+
+        if (matrix) {
+          matrix.querySelector(".gantt-scurve-host")?.remove();
+          matrix.querySelector(".panel-header")?.remove();
+          matrix.style.width = `${reportWidth}px`;
+          stage.append(matrix);
+        }
+
+        sheet.style.width = `${reportWidth}px`;
+        sheet.append(stage);
         document.getElementById("view-schedule").prepend(sheet);
-        // Physical fit includes both timeline and period table, not the viewport width.
-        const fitWidth=paperWidth*96/25.4/width;
-        const height=Math.max(sheet.scrollHeight,chart.scrollHeight+(matrix?matrix.scrollHeight:0)+110);
-        const fitPage=paperHeight*96/25.4/Math.max(1,height);
-        const mode=document.body.dataset.printFit||"page";
-        sheet.style.setProperty("--report-print-scale",String(Math.min(1,fitWidth,mode==="page"?fitPage:1)));
+
+        const sourceHeight = Math.max(1, stage.scrollHeight, stage.getBoundingClientRect().height);
+        const requestedMode = document.body.dataset.printFit || "page";
+        const layout = computePrintLayout({ size, requestedMode, contentWidthPx: reportWidth, contentHeightPx: sourceHeight });
+        document.body.dataset.printFit = layout.mode;
+        document.body.dataset.printRequestedFit = requestedMode;
+        sheet.dataset.printFallback = layout.fallback ? "readability" : "";
+        sheet.style.setProperty("--report-print-scale", String(layout.scale));
+        sheet.style.setProperty("--report-source-width", `${reportWidth}px`);
+        sheet.style.setProperty("--report-source-height", `${sourceHeight}px`);
+        sheet.style.setProperty("--report-printed-width", `${reportWidth * layout.scale}px`);
+        sheet.style.setProperty("--report-printed-height", `${sourceHeight * layout.scale}px`);
+
+        if (layout.fallback) {
+          showToast(`Fit Page would shrink this report below ${Math.round(PRINT_MIN_SCALE * 100)}%. Switched to Fit Width for readability.`, "warning");
+        } else if (layout.belowReadableScale) {
+          showToast("This report is very wide. Consider A3, fewer visible columns, monthly periods, or collapsing WBS.", "warning");
+        }
       }
     }
-    requestAnimationFrame(() => window.print());
+
+    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
   }
 
-  window.addEventListener("afterprint", () => { delete document.body.dataset.printView;document.getElementById("schedule-print-sheet")?.remove(); });
+  window.addEventListener("afterprint", () => {
+    delete document.body.dataset.printView;
+    delete document.body.dataset.printRequestedFit;
+    document.getElementById("schedule-print-sheet")?.remove();
+  });
 
   function truncate(value, max) {
     const text = String(value || "");
@@ -2258,7 +2362,7 @@ document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activiti
     if(!pilotProjects.items.length){pilotProjects.active=crypto.randomUUID();pilotProjects.items=[{id:pilotProjects.active,data:JSON.parse(JSON.stringify(state))}];}
     historySnapshot=JSON.stringify({project:state.project,tasks:state.tasks});
     const bar=document.createElement("div");bar.className="pilot-bar";bar.innerHTML=`<span class="pilot-version">Pilot 0.8 · ข้อมูลในเครื่อง</span><button data-pilot="projects">โครงการ</button><button data-pilot="guide">เริ่มต้น</button><button data-pilot="undo">Undo</button><button data-pilot="redo">Redo</button><button data-pilot="validate">ตรวจข้อมูล</button><button data-pilot="print">ตั้งค่าพิมพ์</button><button data-pilot="feedback">Feedback</button><select id="pilot-language" aria-label="Language"><option value="th">ไทย</option><option value="en">English</option></select>`;
-    bar.querySelector(".pilot-version").textContent="Pilot 0.9 · ข้อมูลในเครื่อง";
+    bar.querySelector(".pilot-version").textContent="Pilot 0.9.1 · ข้อมูลในเครื่อง";
     const logButton=document.createElement("button");logButton.dataset.weeklyActual="";logButton.textContent="Actual รายสัปดาห์";bar.insertBefore(logButton,bar.querySelector("select"));
     document.querySelector(".topbar").after(bar);
     initLanguage();
@@ -2287,7 +2391,7 @@ document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activiti
       }
       if(action==="feedback")pilotDialog("Feedback", `<p>อธิบายปัญหา ขั้นตอนที่ทำ ผลที่คาดหวัง และแนบภาพเมื่อส่งให้ผู้พัฒนา</p><textarea id="pilot-feedback" rows="6" placeholder="เมนู / ขั้นตอน / ผลที่เกิดขึ้น"></textarea><p class="pilot-note">รายงานจะดาวน์โหลดลงเครื่อง ไม่ส่งอัตโนมัติ และไม่แนบข้อมูลโครงการ</p><button data-pilot="download-feedback">ดาวน์โหลดรายงาน</button>`);
       if(action==="download-feedback")downloadPilot("GO-feedback.json",{version:"0.7",date:new Date().toISOString(),message:document.getElementById("pilot-feedback").value});
-      if(action==="print")pilotDialog("ตั้งค่าพิมพ์ / Print", `<p>ใช้แถวและคอลัมน์ที่มองเห็นหลังค้นหาและยุบ WBS ในหน้า Gantt กราฟและตารางสรุปจะย่อร่วมกัน ไม่ตัดส่วนที่อยู่นอกจอ</p><label>กระดาษ <select id="pilot-paper"><option>A3</option><option>A4</option></select></label><label>จัดหน้า<select id="pilot-fit"><option value="page">Gantt + ตารางสรุป พอดีหน้าเดียว</option><option value="width">พอดีความกว้าง (หลายหน้าตามความสูง)</option></select></label><label><input id="pilot-register" type="checkbox" checked> รวม Task Register (หน้าใหม่)</label><label><input id="pilot-summary" type="checkbox" checked> รวมตาราง S-Curve</label><p class="pilot-note">งานจำนวนมากจะมีตัวอักษรเล็กเมื่อย่อหน้าเดียว แนะนำ A3 หรือกรอง/ยุบ WBS และตรวจ Print Preview จริง เปิด Background graphics หากเบราว์เซอร์ปิดสีพื้นหลัง</p><button data-pilot="do-print">เปิด Print Preview</button>`);
+      if(action==="print")pilotDialog("ตั้งค่าพิมพ์ / Print", `<p>ใช้แถวและคอลัมน์ที่มองเห็นหลังค้นหาและยุบ WBS ในหน้า Gantt โดย Print จะเลือกระยะ Timeline แยกจาก Zoom หน้าจออัตโนมัติ</p><label>กระดาษ <select id="pilot-paper"><option>A3</option><option>A4</option></select></label><label>จัดหน้า<select id="pilot-fit"><option value="page">Gantt + ตารางสรุป พอดีหน้าเดียว</option><option value="width">พอดีความกว้าง (หลายหน้าตามความสูง)</option></select></label><label><input id="pilot-register" type="checkbox" checked> รวม Task Register (หน้าใหม่)</label><label><input id="pilot-summary" type="checkbox" checked> รวมตาราง S-Curve</label><p class="pilot-note">ถ้า Fit Page ต้องย่อเล็กกว่าเกณฑ์อ่านได้ โปรแกรมจะสลับเป็น Fit Width อัตโนมัติ แนะนำ A3 / Monthly / ยุบ WBS สำหรับรายงานยาว และเปิด Background graphics ใน Print Preview หากต้องการสีพื้นหลัง</p><button data-pilot="do-print">เปิด Print Preview</button>`);
       if(action==="do-print"){
         document.body.dataset.printFit=document.getElementById("pilot-fit").value;
         document.body.classList.toggle("pilot-hide-register",!document.getElementById("pilot-register").checked);document.body.classList.toggle("pilot-hide-summary",!document.getElementById("pilot-summary").checked);
@@ -2302,6 +2406,9 @@ document.getElementById("lookahead-summary").innerHTML=[kpiCard({label:"Activiti
     parsePredecessors,
     normalizeActualHistory,
     isISODate,
+    computePrintLayout,
+    resolvePrintZoom,
+    printPageMetrics,
     importXml(file) { return new Promise(resolve=>importMicrosoftProjectXml({target:{files:[file],value:""}},resolve)); },
     inspect(tasks,project={}) {
       const previous=state;
